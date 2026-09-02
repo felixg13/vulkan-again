@@ -34,18 +34,25 @@ Device createDevice(GLFWwindow *window, const DeviceDesc &desc) {
   features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
   features12.bufferDeviceAddress = true;
   features12.descriptorIndexing = true;
+  features12.shaderSampledImageArrayNonUniformIndexing = true;
+  features12.descriptorBindingVariableDescriptorCount = true;
+  features12.runtimeDescriptorArray = true;
+
+  VkPhysicalDeviceFeatures features10{};
+  features10.samplerAnisotropy = VK_TRUE;
 
   vkb::PhysicalDeviceSelector selector{instance};
   vkb::PhysicalDevice physicalDevice = selector.set_minimum_version(1, 4)
                                            .set_required_features_13(features13)
                                            .set_required_features_12(features12)
+                                           .set_required_features(features10)
                                            .set_surface(device.surface)
                                            .select()
                                            .value();
 
   device.physicalDevice = physicalDevice.physical_device;
 
-  VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+  utils::validation::chk(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
       device.physicalDevice, device.surface, &device.surfaceCapabilities));
 
   VkPhysicalDeviceProperties deviceProperties;
@@ -69,14 +76,14 @@ Device createDevice(GLFWwindow *window, const DeviceDesc &desc) {
   allocatorInfo.device = device.device;
   allocatorInfo.instance = device.instance;
   allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
-  vmaCreateAllocator(&allocatorInfo, &device.allocator);
+  utils::validation::chk(vmaCreateAllocator(&allocatorInfo, &device.allocator));
   SPDLOG_INFO("Initialized Vulkan Memory Allocator");
 
   return device;
 }
 
 void destroyDevice(Device &device) {
-  vkDeviceWaitIdle(device.device);
+  utils::validation::chk(vkDeviceWaitIdle(device.device));
 
   vmaDestroyAllocator(device.allocator);
 

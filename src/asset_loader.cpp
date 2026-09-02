@@ -1,5 +1,4 @@
 #include <asset_loader.h>
-#include <numeric>
 #include <tiny_obj_loader.h>
 
 #include <cstddef>
@@ -8,7 +7,7 @@
 using std::filesystem::path;
 
 bool load_model(const path &path, std::vector<Vertex> &vertices,
-                std::vector<size_t> &indices) {
+                std::vector<uint32_t> &indices) {
 
   tinyobj::attrib_t attrib;
   std::vector<tinyobj::shape_t> shapes;
@@ -18,7 +17,6 @@ bool load_model(const path &path, std::vector<Vertex> &vertices,
     return false;
   }
 
-  std::iota(indices.begin(), indices.end(), 0);
   for (auto &indice : shapes[0].mesh.indices) {
     size_t vertexIndex = indice.vertex_index;
     size_t normalIndex = indice.normal_index;
@@ -30,9 +28,10 @@ bool load_model(const path &path, std::vector<Vertex> &vertices,
     vertex.normal = {attrib.normals[normalIndex * 3],
                      -attrib.normals[(normalIndex * 3) + 1],
                      attrib.normals[(normalIndex * 3) + 2]};
-    vertex.uv = {attrib.texcoords[uvIndex * 3],
-                 1.0 - attrib.texcoords[(uvIndex * 3) + 2]};
+    vertex.uv = {attrib.texcoords[uvIndex * 2],
+                 1.0 - attrib.texcoords[(uvIndex * 2) + 1]};
     vertices.push_back(vertex);
+    indices.push_back(static_cast<uint32_t>(indices.size()));
   }
   return true;
 }

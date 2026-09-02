@@ -7,6 +7,8 @@ GLFWwindow *createWindow(const WindowDesc &desc) {
     fprintf(stderr, "GLFW error %d: %s\n", error, description);
   });
 
+  glfwInitHint(GLFW_WAYLAND_LIBDECOR, GLFW_WAYLAND_DISABLE_LIBDECOR);
+
   if (glfwInit() == 0) {
     assert(!"GLFW not initialized properly!");
   }

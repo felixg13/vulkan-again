@@ -11,4 +11,4 @@ struct Vertex {
 };
 
 bool load_model(const path &path, std::vector<Vertex> &vertices,
-                std::vector<size_t> &indices);
+                std::vector<uint32_t> &indices);
