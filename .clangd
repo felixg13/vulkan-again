@@ -1,0 +1,33 @@
+CompileFlags:
+  CompilationDatabase: build/debug
+  Add:
+    - -x
+    - c++
+    - -std=c++23
+    - -Wall
+    - -Wextra
+    - -Wno-unused-parameter
+
+Diagnostics:
+  ClangTidy:
+    Add:
+      - modernize-use-nullptr
+      - modernize-raw-string-literal
+      - modernize-loop-convert
+      - performance-*
+      - readability-*
+      - bugprone-*
+    Remove: []
+    CheckOptions:
+      readability-identifier-naming.VariableCase: camelBack
+      readability-identifier-naming.ConstexprVariableCase: UPPER_CASE
+Index:
+  Background: true
+  StandardLibrary: system
+
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true
+  Designators: true
+

@@ -1,0 +1,21 @@
+option(WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+
+function(set_project_warnings target_name)
+  set(CLANG_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wnon-virtual-dtor -Wcast-align -Wunused -Woverloaded-virtual)
+  set(GCC_WARNINGS ${CLANG_WARNINGS} -Wmisleading-indentation -Wduplicated-cond -Wlogical-op)
+  set(MSVC_WARNINGS /W4 /permissive-)
+
+  if(WARNINGS_AS_ERRORS)
+    list(APPEND CLANG_WARNINGS -Werror)
+    list(APPEND GCC_WARNINGS -Werror)
+    list(APPEND MSVC_WARNINGS /WX)
+  endif()
+
+  if(MSVC)
+    target_compile_options(${target_name} PRIVATE ${MSVC_WARNINGS})
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES ".*Clang")
+    target_compile_options(${target_name} PRIVATE ${CLANG_WARNINGS})
+  elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(${target_name} PRIVATE ${GCC_WARNINGS})
+  endif()
+endfunction()

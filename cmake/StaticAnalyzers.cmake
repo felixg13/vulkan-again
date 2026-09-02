@@ -1,0 +1,20 @@
+option(ENABLE_CLANG_TIDY "Enable clang-tidy" OFF)
+option(ENABLE_CPPCHECK "Enable cppcheck" OFF)
+
+function(enable_static_analyzers target_name)
+  if(ENABLE_CLANG_TIDY)
+    find_program(CLANG_TIDY_EXE NAMES "clang-tidy")
+    if(CLANG_TIDY_EXE)
+      set(CHECKS "-*,bugprone-*,clang-analyzer-*,cppcoreguidelines-*,modernize-*,performance-*,readability-*")
+      set_target_properties(${target_name} PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_EXE};--checks=${CHECKS}")
+    endif()
+  endif()
+
+  if(ENABLE_CPPCHECK)
+    find_program(CPPCHECK_EXE NAMES "cppcheck")
+    if(CPPCHECK_EXE)
+      set_target_properties(${target_name} PROPERTIES
+        CXX_CPPCHECK "${CPPCHECK_EXE};--enable=all;--suppress=missingIncludeSystem;--inline-suppr")
+    endif()
+  endif()
+endfunction()

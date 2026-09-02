@@ -1,0 +1,38 @@
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  option(ENABLE_ASAN "Enable AddressSanitizer" ON)
+  option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" ON)
+else()
+  option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+  option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+endif()
+option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+
+function(enable_sanitizers target_name)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    return()
+  endif()
+
+  set(SANITIZERS "")
+
+  if(ENABLE_ASAN)
+    list(APPEND SANITIZERS "address")
+  endif()
+
+  if(ENABLE_UBSAN)
+    list(APPEND SANITIZERS "undefined")
+  endif()
+
+  if(ENABLE_TSAN)
+    if(ENABLE_ASAN)
+      message(WARNING "ThreadSanitizer incompatible with AddressSanitizer")
+    else()
+      list(APPEND SANITIZERS "thread")
+    endif()
+  endif()
+
+  if(SANITIZERS)
+    list(JOIN SANITIZERS "," SANITIZER_LIST)
+    target_compile_options(${target_name} PRIVATE -fsanitize=${SANITIZER_LIST} -fno-omit-frame-pointer -g)
+    target_link_options(${target_name} PRIVATE -fsanitize=${SANITIZER_LIST})
+  endif()
+endfunction()
