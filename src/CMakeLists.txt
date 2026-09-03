@@ -22,15 +22,13 @@ target_link_libraries(
   vulkan_engine_lib
   PUBLIC Vulkan::Vulkan
          glm
-         EnTT
          VulkanMemoryAllocator
          glfw
-         imgui
          spdlog
          tinyobjloader
          ktx_read
          slang::slang
-  PRIVATE stb_image vk-bootstrap::vk-bootstrap tinygltf)
+  PRIVATE vk-bootstrap::vk-bootstrap)
 
 include(CompilerWarnings)
 set_project_warnings(vulkan_engine_lib)

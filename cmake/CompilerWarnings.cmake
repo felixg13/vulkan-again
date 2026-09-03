@@ -1,7 +1,7 @@
 option(WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
 function(set_project_warnings target_name)
-  set(CLANG_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wnon-virtual-dtor -Wcast-align -Wunused -Woverloaded-virtual)
+  set(CLANG_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wnon-virtual-dtor -Wcast-align -Wunused -Woverloaded-virtual -Wno-missing-field-initializers)
   set(GCC_WARNINGS ${CLANG_WARNINGS} -Wmisleading-indentation -Wduplicated-cond -Wlogical-op)
   set(MSVC_WARNINGS /W4 /permissive-)
 
