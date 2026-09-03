@@ -11,6 +11,8 @@ add_library(
   asset_loader.cpp
   image.h
   image.cpp
+  shader.h
+  shader.cpp
   main.cpp)
 
 target_compile_features(vulkan_engine_lib PUBLIC cxx_std_23)
@@ -27,6 +29,7 @@ target_link_libraries(
          spdlog
          tinyobjloader
          ktx_read
+         slang::slang
   PRIVATE stb_image vk-bootstrap::vk-bootstrap tinygltf)
 
 include(CompilerWarnings)
@@ -42,6 +45,7 @@ add_dependencies(vulkan_engine_lib Shaders)
 
 add_executable(engine main.cpp)
 target_link_libraries(engine PRIVATE vulkan_engine_lib)
+set_target_properties(engine PROPERTIES BUILD_RPATH "$<TARGET_FILE_DIR:slang::slang>")
 
 include(Sanitizers)
 enable_sanitizers(engine)

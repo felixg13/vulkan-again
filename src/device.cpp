@@ -41,8 +41,13 @@ Device createDevice(GLFWwindow *window, const DeviceDesc &desc) {
   VkPhysicalDeviceFeatures features10{};
   features10.samplerAnisotropy = VK_TRUE;
 
+  VkPhysicalDeviceVulkan14Features features14{};
+  features14.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES;
+  features14.maintenance5 = true;
+
   vkb::PhysicalDeviceSelector selector{instance};
   vkb::PhysicalDevice physicalDevice = selector.set_minimum_version(1, 4)
+                                           .set_required_features_14(features14)
                                            .set_required_features_13(features13)
                                            .set_required_features_12(features12)
                                            .set_required_features(features10)

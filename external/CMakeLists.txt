@@ -127,6 +127,11 @@ FetchContent_Declare(
   GIT_TAG v1.16.0
   GIT_SHALLOW TRUE)
 
+FetchContent_Declare(
+  slang
+  URL https://github.com/shader-slang/slang/releases/download/v2026.14/slang-2026.14-linux-x86_64.tar.gz
+  URL_HASH SHA256=9445cf0b35332bfda055c9424e307f957ff58befb04c5b45b9f9f29894a41cf8)
+
 FetchContent_GetProperties(imgui)
 if(NOT imgui_POPULATED)
   FetchContent_Populate(imgui)
@@ -171,7 +176,11 @@ FetchContent_MakeAvailable(
   EnTT
   ktx
   spdlog
+  slang
   googletest)
+
+find_package(slang CONFIG REQUIRED PATHS ${slang_SOURCE_DIR} NO_DEFAULT_PATH)
+set_target_properties(slang::slang PROPERTIES IMPORTED_GLOBAL TRUE)
 
 get_target_property(VK_BOOTSTRAP_INCLUDE_DIRS vk-bootstrap
                     INTERFACE_INCLUDE_DIRECTORIES)
