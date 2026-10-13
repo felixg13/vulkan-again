@@ -7,6 +7,7 @@ struct VSInput {
 struct PerFrameData {
     float4x4 projection;
     float4x4 view;
+    // World-space direction the light travels (unit vector, w = 0).
     float4 light_dir;
 };
 
@@ -21,7 +22,7 @@ struct VSOutput {
     float4 Pos : SV_POSITION;
     float3 Normal;
     float2 UV;
-    float3 LightVec;
+    float3 LightDir; // view-space direction the light travels
     float3 ViewVec;
 };
 
@@ -34,7 +35,7 @@ VSOutput main(VSInput input, uniform PerDrawData *per_draw) {
     output.Pos = mul(per_frame.projection, mul(per_frame.view, mul(modelMat, float4(input.Pos.xyz, 1.0))));
     // Calculate view vectors required for lighting
     float4 fragPos = mul(mul(per_frame.view, modelMat), float4(input.Pos.xyz, 1.0));
-    output.LightVec = per_frame.light_dir.xyz - fragPos.xyz;
+    output.LightDir = mul((float3x3)per_frame.view, per_frame.light_dir.xyz);
     output.ViewVec = -fragPos.xyz;
     return output;
 }
@@ -43,7 +44,7 @@ VSOutput main(VSInput input, uniform PerDrawData *per_draw) {
 float4 main(VSOutput input) {
     // Phong lighting
     float3 N = normalize(input.Normal);
-    float3 L = normalize(input.LightVec);
+    float3 L = normalize(-input.LightDir);
     float3 V = normalize(input.ViewVec);
     float3 R = reflect(-L, N);
     float3 diffuse = max(dot(N, L), 0.0025);

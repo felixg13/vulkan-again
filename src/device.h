@@ -1,15 +1,14 @@
 #pragma once
 
-#include <GLFW/glfw3.h>
 #include <utils.h>
 #include <vk_mem_alloc.h>
 #include <vulkan/vulkan.hpp>
 
+#include <functional>
+
 struct Device {
   VkInstance instance = VK_NULL_HANDLE;
   VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
-  VkSurfaceKHR surface = VK_NULL_HANDLE;
-  VkSurfaceCapabilitiesKHR surfaceCapabilities;
   VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
   VkDevice device = VK_NULL_HANDLE;
   VkQueue graphicsQueue = VK_NULL_HANDLE;
@@ -24,6 +23,12 @@ struct DeviceDesc {
   uint32_t apiVersion = VK_API_VERSION_1_4;
 };
 
-Device createDevice(GLFWwindow *window, const DeviceDesc &desc);
+// Called with the freshly created instance; returns the surface used for
+// queue-family selection. The caller keeps ownership of the surface and must
+// destroy it before destroyDevice(). An empty factory creates a headless
+// device (no surface, no WSI instance extensions).
+using SurfaceFactory = std::function<VkSurfaceKHR(VkInstance)>;
+
+Device createDevice(const DeviceDesc &desc, const SurfaceFactory &create_surface = {});
 
 void destroyDevice(Device &device);

@@ -32,3 +32,5 @@ validate_shaders(Shaders "${PROJECT_SOURCE_DIR}/shaders")
 
 add_subdirectory(external)
 add_subdirectory(src)
+enable_testing()
+add_subdirectory(tests)

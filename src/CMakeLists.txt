@@ -13,7 +13,8 @@ add_library(
   image.cpp
   shader.h
   shader.cpp
-  main.cpp)
+  renderer.h
+  renderer.cpp)
 
 target_compile_features(vulkan_engine_lib PUBLIC cxx_std_23)
 target_include_directories(vulkan_engine_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

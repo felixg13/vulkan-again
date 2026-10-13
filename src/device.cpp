@@ -1,15 +1,17 @@
+#define VMA_IMPLEMENTATION
 #include <VkBootstrap.h>
 #include <device.h>
 #include <spdlog/spdlog.h>
 #include <utils.h>
 
-Device createDevice(GLFWwindow *window, const DeviceDesc &desc) {
+Device createDevice(const DeviceDesc &desc, const SurfaceFactory &create_surface) {
   Device device{};
 
   vkb::InstanceBuilder builder;
   vkb::Instance instance = builder.set_app_name(desc.applicationName.c_str())
                                .request_validation_layers(true)
                                .use_default_debug_messenger()
+                               .set_headless(!create_surface)
                                .require_api_version(1, 4, 0)
                                .build()
                                .value();
@@ -17,13 +19,10 @@ Device createDevice(GLFWwindow *window, const DeviceDesc &desc) {
   device.instance = instance;
   device.debugMessenger = instance.debug_messenger;
 
-  VkResult surfaceResult = glfwCreateWindowSurface(device.instance, window,
-                                                   nullptr, &device.surface);
-
-  if (surfaceResult != VK_SUCCESS) {
-    assert(!"Failed to create Vulkan surface");
+  VkSurfaceKHR surface = VK_NULL_HANDLE;
+  if (create_surface) {
+    surface = create_surface(device.instance);
   }
-  SPDLOG_INFO("Created Vulkan surface");
 
   VkPhysicalDeviceVulkan13Features features13{};
   features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
@@ -51,14 +50,11 @@ Device createDevice(GLFWwindow *window, const DeviceDesc &desc) {
                                            .set_required_features_13(features13)
                                            .set_required_features_12(features12)
                                            .set_required_features(features10)
-                                           .set_surface(device.surface)
+                                           .set_surface(surface)
                                            .select()
                                            .value();
 
   device.physicalDevice = physicalDevice.physical_device;
-
-  utils::validation::chk(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
-      device.physicalDevice, device.surface, &device.surfaceCapabilities));
 
   VkPhysicalDeviceProperties deviceProperties;
   vkGetPhysicalDeviceProperties(device.physicalDevice, &deviceProperties);
@@ -93,8 +89,6 @@ void destroyDevice(Device &device) {
   vmaDestroyAllocator(device.allocator);
 
   vkDestroyDevice(device.device, nullptr);
-
-  vkDestroySurfaceKHR(device.instance, device.surface, nullptr);
 
   if (device.debugMessenger != VK_NULL_HANDLE) {
     vkb::destroy_debug_utils_messenger(device.instance, device.debugMessenger);
