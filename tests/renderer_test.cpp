@@ -22,6 +22,10 @@ constexpr uint32_t WIDTH = 320;
 constexpr uint32_t HEIGHT = 180;
 constexpr int CHANNEL_TOLERANCE = 4;
 
+const std::array<glm::vec4, 3> base_colors{
+    glm::vec4(0.80f, 0.45f, 0.35f, 1.0f), glm::vec4(1.00f, 0.77f, 0.34f, 1.0f),
+    glm::vec4(0.30f, 0.50f, 0.90f, 1.0f)};
+
 const std::filesystem::path assets_dir =
     std::filesystem::path(PROJECT_SOURCE_DIR) / "assets";
 const std::filesystem::path shaders_dir =
@@ -49,9 +53,8 @@ protected:
                                    0.0f)) *
           glm::mat4_cast(glm::quat(
               glm::vec3(0.2f, 0.5f * (static_cast<float>(i) - 1.0f), 0.0f)));
-      prims[i] = renderer->add_prim(
-          mesh, assets_dir / ("suzanne" + std::to_string(i) + ".ktx"),
-          prim_transforms[i]);
+      materials[i] = renderer->compile_material_from_color(base_colors[i]);
+      prims[i] = renderer->add_prim(mesh, materials[i], prim_transforms[i]);
     }
 
     frame.projection = glm::perspective(
@@ -73,6 +76,7 @@ protected:
   std::vector<Vertex> vertices;
   std::vector<uint32_t> indices;
   MeshHandle mesh{};
+  std::array<MaterialHandle, 3> materials{};
   std::array<PrimHandle, 3> prims{};
   std::array<glm::mat4, 3> prim_transforms{};
   PerFrameData frame{};
@@ -285,8 +289,8 @@ TEST_F(RendererTest, RemovedPrimIsNotDrawnAndSlotIsReused) {
   }
   EXPECT_GT(all_center_non_background, 0u) << "middle prim was never drawn";
 
-  PrimHandle replacement = renderer->add_prim(
-      mesh, assets_dir / "suzanne1.ktx", prim_transforms[1]);
+  PrimHandle replacement =
+      renderer->add_prim(mesh, materials[1], prim_transforms[1]);
   EXPECT_EQ(replacement.index, prims[1].index);
   EXPECT_NE(replacement.generation, prims[1].generation);
   renderer->render(target, frame);
@@ -323,7 +327,9 @@ TEST_F(RendererTest, ReleaseMeshWithLivePrimAsserts) {
 }
 
 TEST_F(RendererTest, PrimsSharingMeshAndSpirvShareOnePipeline) {
-  EXPECT_EQ(renderer->pipeline_count(), 0u);
+  // The fixture creates the target before compiling materials, so the first
+  // material compile already pre-warmed the one pipeline.
+  EXPECT_EQ(renderer->pipeline_count(), 1u);
   renderer->render(target, frame);
   EXPECT_EQ(renderer->pipeline_count(), 1u);
 }
@@ -346,4 +352,89 @@ TEST_F(RendererTest, DifferentTargetFormatsCreateDifferentPipelines) {
       {WIDTH, HEIGHT}, VK_FORMAT_B8G8R8A8_SRGB);
   renderer->render(bgra_target, frame);
   EXPECT_EQ(renderer->pipeline_count(), 2u);
+}
+
+TEST_F(RendererTest, ThreeMaterialsFromOneShaderShareOnePipeline) {
+  // Three more materials from the same shader; the fixture already holds three.
+  for (size_t i = 0; i < 3; i++) {
+    renderer->compile_material_from_color(base_colors[i]);
+  }
+  renderer->render(target, frame);
+  EXPECT_EQ(renderer->pipeline_count(), 1u);
+}
+
+TEST_F(RendererTest, StaleHandleAfterReleaseMaterialAsserts) {
+#ifdef NDEBUG
+  GTEST_SKIP() << "assert() is compiled out";
+#else
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  MaterialHandle extra =
+      renderer->compile_material_from_color(base_colors[0]);
+  renderer->release_material(extra);
+  EXPECT_DEATH(renderer->add_prim(mesh, extra, glm::mat4(1.0f)),
+               "stale or invalid MaterialHandle");
+#endif
+}
+
+TEST_F(RendererTest, ReleaseMaterialWithLivePrimAsserts) {
+#ifdef NDEBUG
+  GTEST_SKIP() << "assert() is compiled out";
+#else
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(renderer->release_material(materials[0]),
+               "still references this material");
+#endif
+}
+
+TEST_F(RendererTest, ReleasedMaterialSlotIsReusedAndRenderIsUnchanged) {
+  std::vector<std::byte> before(WIDTH * HEIGHT * 4);
+  std::vector<std::byte> after(WIDTH * HEIGHT * 4);
+  renderer->render(target, frame);
+  renderer->read_back(before);
+
+  renderer->remove_prim(prims[0]);
+  renderer->release_material(materials[0]);
+  MaterialHandle replacement =
+      renderer->compile_material_from_color(base_colors[0]);
+  EXPECT_EQ(replacement.index, materials[0].index);
+  EXPECT_NE(replacement.generation, materials[0].generation);
+  PrimHandle prim =
+      renderer->add_prim(mesh, replacement, prim_transforms[0]);
+  EXPECT_EQ(prim.index, prims[0].index);
+
+  renderer->render(target, frame);
+  renderer->read_back(after);
+  int max_diff = 0;
+  for (size_t i = 0; i < before.size(); i++) {
+    max_diff = std::max(max_diff, std::abs(static_cast<int>(before[i]) -
+                                           static_cast<int>(after[i])));
+  }
+  EXPECT_EQ(max_diff, 0);
+}
+
+TEST_F(RendererTest, LightDirectionIsMirroredIntoMaterialsEveryFrame) {
+  std::vector<std::byte> from_above(WIDTH * HEIGHT * 4);
+  std::vector<std::byte> from_side(WIDTH * HEIGHT * 4);
+
+  frame.light_dir = glm::vec4(0.0f, 1.0f, -0.5f, 0.0f);
+  renderer->render(target, frame);
+  renderer->read_back(from_above);
+
+  frame.light_dir = glm::vec4(-1.0f, 0.0f, -0.5f, 0.0f);
+  renderer->render(target, frame);
+  renderer->read_back(from_side);
+
+  int max_diff = 0;
+  size_t over_tolerance = 0;
+  for (size_t i = 0; i < from_above.size(); i++) {
+    int diff = std::abs(static_cast<int>(from_above[i]) -
+                        static_cast<int>(from_side[i]));
+    max_diff = std::max(max_diff, diff);
+    if (diff > CHANNEL_TOLERANCE) {
+      over_tolerance++;
+    }
+  }
+  EXPECT_GT(over_tolerance, 1000u)
+      << "max per-channel difference " << max_diff << " (tolerance "
+      << CHANNEL_TOLERANCE << ")";
 }

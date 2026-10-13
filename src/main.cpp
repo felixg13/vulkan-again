@@ -130,10 +130,19 @@ int main() {
   MeshHandle suzanneMesh = renderer->add_mesh(
       {.vertices = suzanneVertices, .indices = suzanneIndices});
 
+  const std::array<glm::vec4, PRIM_COUNT> baseColors{
+      glm::vec4(0.80f, 0.45f, 0.35f, 1.0f), // clay
+      glm::vec4(1.00f, 0.77f, 0.34f, 1.0f), // gold
+      glm::vec4(0.30f, 0.50f, 0.90f, 1.0f)}; // blue
+  std::array<MaterialHandle, PRIM_COUNT> materials{};
+  for (size_t i = 0; i < materials.size(); i++) {
+    materials[i] = renderer->compile_material_from_color(baseColors[i]);
+  }
+
   std::array<PrimHandle, PRIM_COUNT> prims{};
   for (size_t i = 0; i < prims.size(); i++) {
     prims[i] = renderer->add_prim(
-        suzanneMesh, assetsDir / ("suzanne" + std::to_string(i) + ".ktx"),
+        suzanneMesh, materials[i],
         glm::translate(glm::mat4(1.0f),
                        glm::vec3((static_cast<float>(i) - 1.0f) * 3.0f, 0.0f,
                                  0.0f)));

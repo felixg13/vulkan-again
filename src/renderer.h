@@ -4,6 +4,7 @@
 #include <buffer.h>
 #include <device.h>
 #include <image.h>
+#include <material.h>
 #include <pipeline_cache.h>
 #include <shader.h>
 
@@ -68,10 +69,15 @@ public:
   MeshHandle add_mesh(const MeshData &mesh);
   void release_mesh(MeshHandle mesh);
 
-  // `texture_path` is a temporary stand-in for the texture set that a
-  // MaterialHandle will carry; Step 4 replaces it. The KTX is loaded and bound
-  // as the prim's set 1, and is destroyed together with the prim.
-  PrimHandle add_prim(MeshHandle mesh, const std::filesystem::path &texture_path,
+  // Compiles the shader, builds set 1 from reflection, creates the params UBO
+  // with `base_color` and pre-warms the pipeline when a target format is
+  // known. Step 5 replaces this with compile_material (MaterialX); remove then.
+  MaterialHandle compile_material_from_color(const glm::vec4 &base_color);
+  // Frees the UBO and descriptor set. Releasing a material a live
+  // prim references is a contract violation (assert).
+  void release_material(MaterialHandle material);
+
+  PrimHandle add_prim(MeshHandle mesh, MaterialHandle material,
                       const glm::mat4 &transform);
   void set_transform(PrimHandle prim, const glm::mat4 &transform);
   void remove_prim(PrimHandle prim);
@@ -102,14 +108,13 @@ private:
 
   struct PrimSlot {
     uint32_t mesh_index{0};
-    Texture texture{};
-    VkDescriptorSet texture_desc_set{VK_NULL_HANDLE};
+    MaterialHandle material{};
     uint32_t generation{1};
     bool live{false};
   };
 
   Device _device;
-  Shader _shader;
+  std::filesystem::path _shader_path;
 
   VkCommandPool _command_pool{VK_NULL_HANDLE};
   VkCommandBuffer _command_buffer{VK_NULL_HANDLE};
@@ -124,12 +129,13 @@ private:
   std::vector<Buffer> _transform_buffers;
   std::vector<VkDeviceAddress> _transform_addresses;
 
-  VkDescriptorSetLayout _set1_layout{VK_NULL_HANDLE};
-  VkDescriptorPool _set1_pool{VK_NULL_HANDLE};
-
   VertexLayout _vertex_layout;
   VkPipelineCache _vk_pipeline_cache{VK_NULL_HANDLE};
   PipelineCache _pipelines;
+  MaterialLibrary _materials;
+  // Color format of the most recent target; VK_FORMAT_UNDEFINED until one
+  // exists. Material compile pre-warms its pipeline with it.
+  VkFormat _known_color_format{VK_FORMAT_UNDEFINED};
 
   std::vector<MeshSlot> _meshes;
   std::vector<uint32_t> _free_meshes;

@@ -15,11 +15,16 @@ add_library(
   shader.cpp
   pipeline_cache.h
   pipeline_cache.cpp
+  material.h
+  material.cpp
   renderer.h
   renderer.cpp)
 
 target_compile_features(vulkan_engine_lib PUBLIC cxx_std_23)
 target_include_directories(vulkan_engine_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(
+  vulkan_engine_lib PRIVATE
+  PIPELINE_CACHE_PATH="${CMAKE_BINARY_DIR}/pipeline_cache.bin")
 
 target_link_libraries(
   vulkan_engine_lib

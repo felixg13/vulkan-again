@@ -73,10 +73,13 @@ Renderer  (src/renderer.h/.cpp)  — owns everything surface-agnostic
         void           remove_prim(PrimHandle)
         void           render(const RenderTarget&, const PerFrameData&, const RenderSync& = {})
         void           read_back(std::span<std::byte>)                 // offscreen target
+        RenderTarget   create_offscreen_target(VkExtent2D, VkFormat)   // built in Step 2
+        size_t         pipeline_count() const                          // test accessor (Step 3)
 
-PipelineCache  (src/pipeline_cache.h/.cpp)
+PipelineCache  (src/pipeline_cache.h/.cpp)   — built in Step 3
   ├── map<Key, VkPipeline>, map<LayoutKey, VkPipelineLayout>
-  └── get_or_create(...) → VkPipeline         (owns the pipelines)
+  ├── get_or_create(...) → PipelineAndLayout { pipeline, layout }  (owns both)
+  └── pipeline_count() const
 
 MaterialLibrary  (src/material.h/.cpp)
   ├── descriptor pool, slot map<MaterialHandle, CompiledMaterial>
@@ -97,6 +100,8 @@ Descriptor layout (shared by all pipelines):
 set 0 | binding 0 | UBO | PerFrameData { projection, view, light_dir }
 set 1 | reflected  | per-material UBO (incl. u_viewPosition, u_lightData) +
                     SAMPLED_IMAGE / SAMPLER pairs (Slang splits SamplerTexture2D)
+                    Step 4 stub: UBO { float4 base_color_factor; float4 light_dir } +
+                    base color Sampler2D. light_dir is mirrored in per frame (see Step 4).
 push  | 8 bytes    | BDA → PerDrawData { mat4 transform }, vertex stage
 ```
 
@@ -151,7 +156,7 @@ Unverified going in (from a web report, not read in source): generated uniforms 
 
 ---
 
-## Step 1 — Scene & Render Loop Restructure
+## Step 1 — Scene & Render Loop Restructure (DONE)
 
 **Goal:** replace single-draw instancing with a `DrawablePrim` scene and the two-set
 binding layout. Remove `selected` from the GPU path.
@@ -172,10 +177,33 @@ inline pipeline.
 
 ---
 
-## Step 2 — Renderer Extraction with Incremental API
+## Step 2 — Renderer Extraction with Incremental API (DONE)
 
 **Goal:** extract `Renderer` with the incremental scene API. After this step the
 standalone loop calls exactly what a Hydra delegate would.
+
+### As built (deviations from the text below)
+
+- `create_device(desc, SurfaceFactory = {})`: the instance is built first, the caller's
+  factory creates the surface from it, then the physical device is selected with that
+  surface. An empty factory means headless (`set_headless(true)`, no WSI extensions); the
+  gtest uses this. `main.cpp` owns the surface and destroys it before `destroyDevice`.
+- `create_offscreen_target(extent, format)` was added to the API (not in the original
+  listing); it is how the test and the delegate obtain an offscreen target.
+- **Temporary:** `add_prim` takes a KTX path. The renderer loads and uploads the texture
+  and `remove_prim` destroys that texture and its set 1 descriptor set. This is a stand-in
+  that **Step 4 removes**; materials own textures and are released explicitly.
+- Transform slot index equals prim slot index; capacity `MAX_PRIMS = 64`, asserted.
+- `set_transform` writes every ring copy (the ring is vestigial because `render()`
+  blocks, but a transform set once would otherwise be missing from other slots).
+- Handle checks are `assert` and are compiled out under `NDEBUG` (decided; keep).
+- `light_dir` is a world-space direction of travel, `w = 0`, normalized by `render()` before
+  the UBO write; the vertex stage rotates it to view space and the fragment stage uses
+  `L = normalize(-light_dir_view)`. Step 5 maps it to MaterialX `u_lightData`.
+- main.cpp's per-frame fences were dropped (nothing signals them since `render()` waits).
+- Test render format is `R8G8B8A8_SRGB`; the app uses `B8G8R8A8_SRGB`. The test's PNG
+  reader accepts only the test's own output (8-bit RGBA, stored deflate).
+- `main.cpp` is no longer part of the library target; `renderer.*` is. gtest v1.17.0.
 
 ### Device decoupling
 
@@ -239,10 +267,25 @@ End state: same visual output, `Renderer` runs without GLFW or a swapchain, gtes
 
 ---
 
-## Step 3 — PipelineCache
+## Step 3 — PipelineCache (DONE)
 
 **Goal:** extract pipeline creation into a member of `Renderer`, keyed on shader +
 vertex layout + formats.
+
+### As built (deviations from the text below)
+
+- `get_or_create` returns `PipelineAndLayout { pipeline, layout }` because the renderer
+  needs the layout to bind sets and push constants. The pipeline layout (two set layouts +
+  the 8-byte vertex push constant) is created and cached in `PipelineCache`.
+- `PipelineCache::pipeline_count()` was added for tests.
+- `Shader` gained `size_t spirv_hash` (`std::hash<std::string_view>` over the SPIR-V).
+- `Renderer` holds `Shader _shader` and `VertexLayout _vertex_layout` for its lifetime. The
+  constructor no longer takes a color format; the format comes from the target at draw time.
+- A real `VkPipelineCache` is created at construction, loaded from `pipeline_cache.bin` in
+  the working directory if present, and saved in the destructor. A missing file is not an
+  error. The file needs a `.gitignore` entry (repo root for the app, `tests/` for ctest).
+- No pre-warming yet: the render loop calls `get_or_create` per prim (cache hits).
+  Pre-warm arrives with Step 4 (material creation).
 
 ```cpp
 struct VertexLayout {
@@ -277,15 +320,47 @@ End state: all prims sharing SPIR-V yield exactly one pipeline; inline creation 
 **Goal:** `MaterialHandle` end to end through `DrawablePrim` and the renderer, with the
 per-material UBO and reflected set 1, before MaterialX lands.
 
-- `MaterialLibrary` owns the set 1 descriptor pool and the slot map.
-- Stub `compile_from_image(path)`: compiles the existing shader, builds set 1 layout from
-  Slang reflection, creates the params UBO and texture, writes set 1, fetches a pipeline.
-  Removed in Step 5.
-- `add_prim` takes a `MaterialHandle`; the render loop binds `material.set1` and
-  `material.pipeline`, nothing material-specific remains in `main.cpp`.
+- `MaterialLibrary` (a `Renderer` member) owns the set 1 descriptor pool and a generational
+  slot map of `CompiledMaterial`.
+- Stub `Renderer::compile_material_from_image(path)` → `MaterialHandle`: loads and uploads
+  the texture, builds the set 1 layout **from Slang reflection** (not hand-written), creates
+  the params UBO, writes set 1, and calls `get_or_create` to pre-warm the pipeline. Removed
+  in Step 5 (replaced by `compile_material`).
+- `release_material(MaterialHandle)` is explicit. It frees the material's texture, UBO and
+  descriptor set. Releasing a material a live prim references asserts.
+- `add_prim(MeshHandle, MaterialHandle, mat4)`. The Step 2 KTX-path stand-in and the
+  per-prim texture ownership in `remove_prim` are removed; `remove_prim` frees only the prim
+  and its transform slot.
+- The render loop binds `material.set1` and the material's pipeline per prim. Nothing
+  material-specific remains in `main.cpp`.
 - Shutdown order: materials, then pipeline cache.
 
-End state: same output, `DrawablePrim` fully handle-based, gtest unchanged.
+### Stub material UBO (decided: rehearse the Step 5 mirror)
+
+```
+set 1 / binding 0 :  UBO { float4 base_color_factor;   // default (1,1,1,1)
+                           float4 light_dir; }          // mirrored in every frame
+set 1 / binding N :  base color texture (as reflected)
+```
+
+- One persistently mapped UBO per material, no ring (`render()` submits and waits).
+- Reflection supplies the byte offsets of `base_color_factor` and `light_dir`; the
+  material records them. Names are looked up in reflection, not hard-coded offsets.
+- Each frame `render()` writes the normalized world-space `light_dir` into **every live
+  material's** UBO at the recorded offset before drawing. This is the exact mechanism
+  Step 5 uses for `u_lightData` / `u_viewPosition` (spike F1), exercised here with the stub
+  shader so a failure points at the engine and not the generator.
+- The fragment stage reads `light_dir` from the material UBO and rotates it to view space
+  with the view matrix from set 0 (the interpolated normal is in view space). Set 0 is
+  currently visible to the vertex stage only, so its descriptor set layout binding stage
+  flags widen to `VERTEX | FRAGMENT` in this step. The `LightDir` varying and the
+  vertex-stage rotation of the light are removed.
+- The view matrix stays on set 0; only the light moved. Step 5 adds `u_viewPosition` the
+  same way.
+
+End state: same visual output (the look must not change), `DrawablePrim` fully
+handle-based, the 6 existing tests still pass against the unchanged reference image, plus
+new material-lifetime and mirror tests.
 
 ---
 
