@@ -3,7 +3,9 @@
 
 #include <array>
 #include <fstream>
+#include <functional>
 #include <sstream>
+#include <string_view>
 
 ShaderCompiler createShaderCompiler() {
   ShaderCompiler compiler{};
@@ -75,6 +77,9 @@ Shader compileShader(const ShaderCompiler &compiler, const std::string &moduleNa
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
       .codeSize = shader.spirv->getBufferSize(),
       .pCode = static_cast<const uint32_t *>(shader.spirv->getBufferPointer())};
+  shader.spirv_hash = std::hash<std::string_view>{}(std::string_view{
+      static_cast<const char *>(shader.spirv->getBufferPointer()),
+      shader.spirv->getBufferSize()});
 
   SPDLOG_INFO("Compiled shader '{}' to SPIR-V ({} bytes)", moduleName,
              shader.spirv->getBufferSize());

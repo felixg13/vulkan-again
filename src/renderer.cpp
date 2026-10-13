@@ -9,6 +9,8 @@
 #include <array>
 #include <cassert>
 #include <cstring>
+#include <fstream>
+#include <spdlog/spdlog.h>
 #include <glm/gtc/type_ptr.hpp>
 
 namespace {
@@ -23,12 +25,12 @@ struct PerDrawData {
 } // namespace
 
 Renderer::Renderer(const Device &device,
-                   const std::filesystem::path &shader_path,
-                   VkFormat color_format)
-    : _device{device}, _color_format{color_format} {
+                   const std::filesystem::path &shader_path)
+    : _device{device} {
   // SHADER
   ShaderCompiler shader_compiler = createShaderCompiler();
-  Shader shader = compileShader(shader_compiler, "shader", shader_path);
+  _shader = compileShader(shader_compiler, "shader", shader_path);
+  destroyShaderCompiler(shader_compiler);
 
   // COMMAND POOL, COMMAND BUFFER, COMPLETION FENCE
   VkCommandPoolCreateInfo command_pool_ci{
@@ -135,109 +137,39 @@ Renderer::Renderer(const Device &device,
     vkUpdateDescriptorSets(_device.device, 1, &write_set0, 0, nullptr);
   }
 
-  // PIPELINE
-  VkPushConstantRange push_constant_range{.stageFlags =
-                                              VK_SHADER_STAGE_VERTEX_BIT,
-                                          .size = sizeof(VkDeviceAddress)};
-  std::array<VkDescriptorSetLayout, 2> set_layouts{_set0_layout, _set1_layout};
-  VkPipelineLayoutCreateInfo pipeline_layout_ci{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = static_cast<uint32_t>(set_layouts.size()),
-      .pSetLayouts = set_layouts.data(),
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges = &push_constant_range};
-  utils::validation::chk(vkCreatePipelineLayout(
-      _device.device, &pipeline_layout_ci, nullptr, &_pipeline_layout));
-  VkVertexInputBindingDescription vertex_binding{
-      .binding = 0,
-      .stride = sizeof(Vertex),
-      .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
-  std::array<VkVertexInputAttributeDescription, 3> vertex_attributes{
-      VkVertexInputAttributeDescription{
-          .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT},
-      VkVertexInputAttributeDescription{.location = 1,
-                                        .binding = 0,
-                                        .format = VK_FORMAT_R32G32B32_SFLOAT,
-                                        .offset = offsetof(Vertex, normal)},
-      VkVertexInputAttributeDescription{.location = 2,
-                                        .binding = 0,
-                                        .format = VK_FORMAT_R32G32_SFLOAT,
-                                        .offset = offsetof(Vertex, uv)},
-  };
-  VkPipelineVertexInputStateCreateInfo vertex_input_state{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-      .vertexBindingDescriptionCount = 1,
-      .pVertexBindingDescriptions = &vertex_binding,
-      .vertexAttributeDescriptionCount =
-          static_cast<uint32_t>(vertex_attributes.size()),
-      .pVertexAttributeDescriptions = vertex_attributes.data(),
-  };
-  VkPipelineInputAssemblyStateCreateInfo input_assembly_state{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
-  VkPipelineShaderStageCreateInfo vertex_stage_ci{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .pNext = &shader.shaderModuleCI,
-      .stage = VK_SHADER_STAGE_VERTEX_BIT,
-      .module = VK_NULL_HANDLE,
-      .pName = "main"};
-  VkPipelineShaderStageCreateInfo fragment_stage_ci{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .pNext = &shader.shaderModuleCI,
-      .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-      .module = VK_NULL_HANDLE,
-      .pName = "main"};
-  std::array<VkPipelineShaderStageCreateInfo, 2> shader_stages{
-      vertex_stage_ci, fragment_stage_ci};
-  VkPipelineViewportStateCreateInfo viewport_state{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-      .viewportCount = 1,
-      .scissorCount = 1};
-  std::array<VkDynamicState, 2> dynamic_states{VK_DYNAMIC_STATE_VIEWPORT,
-                                               VK_DYNAMIC_STATE_SCISSOR};
-  VkPipelineDynamicStateCreateInfo dynamic_state{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-      .dynamicStateCount = static_cast<uint32_t>(dynamic_states.size()),
-      .pDynamicStates = dynamic_states.data()};
-  VkPipelineDepthStencilStateCreateInfo depth_stencil_state{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-      .depthTestEnable = VK_TRUE,
-      .depthWriteEnable = VK_TRUE,
-      .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL};
-  VkPipelineRenderingCreateInfo rendering_ci{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-      .colorAttachmentCount = 1,
-      .pColorAttachmentFormats = &_color_format,
-      .depthAttachmentFormat = VK_FORMAT_D24_UNORM_S8_UINT};
-  VkPipelineColorBlendAttachmentState blend_attachment{.colorWriteMask = 0xF};
-  VkPipelineColorBlendStateCreateInfo color_blend_state{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-      .attachmentCount = 1,
-      .pAttachments = &blend_attachment};
-  VkPipelineRasterizationStateCreateInfo rasterization_state{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-      .lineWidth = 1.0f};
-  VkPipelineMultisampleStateCreateInfo multisample_state{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
-  VkGraphicsPipelineCreateInfo pipeline_ci{
-      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-      .pNext = &rendering_ci,
-      .stageCount = static_cast<uint32_t>(shader_stages.size()),
-      .pStages = shader_stages.data(),
-      .pVertexInputState = &vertex_input_state,
-      .pInputAssemblyState = &input_assembly_state,
-      .pViewportState = &viewport_state,
-      .pRasterizationState = &rasterization_state,
-      .pMultisampleState = &multisample_state,
-      .pDepthStencilState = &depth_stencil_state,
-      .pColorBlendState = &color_blend_state,
-      .pDynamicState = &dynamic_state,
-      .layout = _pipeline_layout};
-  utils::validation::chk(vkCreateGraphicsPipelines(
-      _device.device, VK_NULL_HANDLE, 1, &pipeline_ci, nullptr, &_pipeline));
+  // VERTEX LAYOUT: the fixed {pos, normal, uv} layout
+  _vertex_layout = {
+      .binding{.binding = 0,
+               .stride = sizeof(Vertex),
+               .inputRate = VK_VERTEX_INPUT_RATE_VERTEX},
+      .attributes{
+          {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT},
+          {.location = 1,
+           .binding = 0,
+           .format = VK_FORMAT_R32G32B32_SFLOAT,
+           .offset = offsetof(Vertex, normal)},
+          {.location = 2,
+           .binding = 0,
+           .format = VK_FORMAT_R32G32_SFLOAT,
+           .offset = offsetof(Vertex, uv)}}};
 
-  destroyShaderCompiler(shader_compiler);
+  // VKPIPELINECACHE, seeded from disk when the file is readable
+  std::vector<char> cache_bytes{};
+  if (std::ifstream cache_file{"pipeline_cache.bin", std::ios::binary};
+      cache_file.good()) {
+    cache_bytes.assign(std::istreambuf_iterator<char>(cache_file),
+                       std::istreambuf_iterator<char>());
+    SPDLOG_INFO("Loaded pipeline cache from pipeline_cache.bin ({} bytes)",
+                cache_bytes.size());
+  } else {
+    SPDLOG_INFO("No pipeline_cache.bin to load; starting with an empty cache");
+  }
+  VkPipelineCacheCreateInfo pipeline_cache_ci{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+      .initialDataSize = cache_bytes.size(),
+      .pInitialData = cache_bytes.data()};
+  utils::validation::chk(vkCreatePipelineCache(
+      _device.device, &pipeline_cache_ci, nullptr, &_vk_pipeline_cache));
 }
 
 Renderer::~Renderer() {
@@ -261,8 +193,23 @@ Renderer::~Renderer() {
   if (_depth_image.resource != VK_NULL_HANDLE) {
     destroyImage(_device, _depth_image);
   }
-  vkDestroyPipeline(_device.device, _pipeline, nullptr);
-  vkDestroyPipelineLayout(_device.device, _pipeline_layout, nullptr);
+  _pipelines.destroy(_device.device);
+  size_t cache_size{0};
+  utils::validation::chk(vkGetPipelineCacheData(
+      _device.device, _vk_pipeline_cache, &cache_size, nullptr));
+  std::vector<char> cache_bytes(cache_size);
+  utils::validation::chk(vkGetPipelineCacheData(
+      _device.device, _vk_pipeline_cache, &cache_size, cache_bytes.data()));
+  if (std::ofstream cache_file{"pipeline_cache.bin",
+                               std::ios::binary | std::ios::trunc};
+      cache_file.write(cache_bytes.data(),
+                       static_cast<std::streamsize>(cache_size))) {
+    SPDLOG_INFO("Saved pipeline cache to pipeline_cache.bin ({} bytes)",
+                cache_size);
+  } else {
+    SPDLOG_INFO("Could not write pipeline_cache.bin");
+  }
+  vkDestroyPipelineCache(_device.device, _vk_pipeline_cache, nullptr);
   vkDestroyDescriptorPool(_device.device, _set1_pool, nullptr);
   vkDestroyDescriptorPool(_device.device, _set0_pool, nullptr);
   vkDestroyDescriptorSetLayout(_device.device, _set1_layout, nullptr);
@@ -498,8 +445,6 @@ void Renderer::remove_prim(PrimHandle prim) {
 
 RenderTarget Renderer::create_offscreen_target(VkExtent2D extent,
                                                VkFormat format) {
-  assert(format == _color_format &&
-         "the pipeline is built for the renderer's color format");
   assert((format == VK_FORMAT_R8G8B8A8_SRGB ||
           format == VK_FORMAT_B8G8R8A8_SRGB) &&
          "read_back assumes 4 bytes per pixel");
@@ -546,7 +491,6 @@ RenderTarget Renderer::create_offscreen_target(VkExtent2D extent,
 
 void Renderer::render(const RenderTarget &target, const PerFrameData &frame,
                       const RenderSync &sync) {
-  assert(target.format == _color_format);
   assert(glm::length(glm::vec3(frame.light_dir)) > 0.0f);
 
   // DEPTH IMAGE follows the target extent
@@ -640,9 +584,6 @@ void Renderer::render(const RenderTarget &target, const PerFrameData &frame,
   vkCmdSetViewport(cb, 0, 1, &viewport);
   VkRect2D scissor{.extent{target.extent}};
   vkCmdSetScissor(cb, 0, 1, &scissor);
-  vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, _pipeline);
-  vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, _pipeline_layout,
-                          0, 1, &_set0_sets[_frame_index], 0, nullptr);
   VkDeviceSize vertex_offset{0};
   for (uint32_t i = 0; i < _prims.size(); i++) {
     const PrimSlot &prim = _prims[i];
@@ -650,8 +591,15 @@ void Renderer::render(const RenderTarget &target, const PerFrameData &frame,
       continue;
     }
     const MeshSlot &mesh = _meshes[prim.mesh_index];
+    PipelineAndLayout pipeline = _pipelines.get_or_create(
+        _device.device, _vk_pipeline_cache, _set0_layout, _shader, _set1_layout,
+        _vertex_layout, target.format, _depth_image.format);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            _pipeline_layout, 1, 1, &prim.texture_desc_set, 0,
+                            pipeline.layout, 0, 1, &_set0_sets[_frame_index], 0,
+                            nullptr);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            pipeline.layout, 1, 1, &prim.texture_desc_set, 0,
                             nullptr);
     vkCmdBindVertexBuffers(cb, 0, 1, &mesh.vertex_buffer.resource,
                            &vertex_offset);
@@ -659,7 +607,7 @@ void Renderer::render(const RenderTarget &target, const PerFrameData &frame,
                          VK_INDEX_TYPE_UINT32);
     VkDeviceAddress per_draw_address{_transform_addresses[_frame_index] +
                                      i * sizeof(PerDrawData)};
-    vkCmdPushConstants(cb, _pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+    vkCmdPushConstants(cb, pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
                        sizeof(VkDeviceAddress), &per_draw_address);
     vkCmdDrawIndexed(cb, mesh.index_count, 1, 0, 0, 0);
   }
@@ -776,3 +724,5 @@ void Renderer::read_back(std::span<std::byte> out) {
       _device.allocator, _readback_buffer.allocation, 0, VK_WHOLE_SIZE));
   std::memcpy(out.data(), _readback_buffer.pMappedData, _readback_buffer.size);
 }
+
+size_t Renderer::pipeline_count() const { return _pipelines.pipeline_count(); }

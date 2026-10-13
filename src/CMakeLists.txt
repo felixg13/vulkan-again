@@ -13,6 +13,8 @@ add_library(
   image.cpp
   shader.h
   shader.cpp
+  pipeline_cache.h
+  pipeline_cache.cpp
   renderer.h
   renderer.cpp)
 

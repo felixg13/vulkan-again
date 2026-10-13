@@ -120,7 +120,7 @@ int main() {
 
   // RENDERER AND SCENE
   auto renderer =
-      std::make_unique<Renderer>(device, shadersDir / "shader.slang", imageFormat);
+      std::make_unique<Renderer>(device, shadersDir / "shader.slang");
 
   std::vector<Vertex> suzanneVertices{};
   std::vector<uint32_t> suzanneIndices{};

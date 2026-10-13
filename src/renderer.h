@@ -4,6 +4,8 @@
 #include <buffer.h>
 #include <device.h>
 #include <image.h>
+#include <pipeline_cache.h>
+#include <shader.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -57,10 +59,8 @@ struct RenderSync { // only the standalone swapchain path needs it
 
 class Renderer {
 public:
-  // `device` must outlive the renderer. `color_format` is the format of every
-  // RenderTarget passed to render() (the pipeline is built for it).
-  Renderer(const Device &device, const std::filesystem::path &shader_path,
-           VkFormat color_format);
+  // `device` must outlive the renderer.
+  Renderer(const Device &device, const std::filesystem::path &shader_path);
   ~Renderer();
   Renderer(const Renderer &) = delete;
   Renderer &operator=(const Renderer &) = delete;
@@ -77,7 +77,7 @@ public:
   void remove_prim(PrimHandle prim);
 
   // Creates (or replaces) the renderer-owned offscreen color image used by
-  // read_back(). `format` must equal the renderer's color format.
+  // read_back(). `format` must be a 4-byte-per-pixel format.
   RenderTarget create_offscreen_target(VkExtent2D extent, VkFormat format);
 
   // Submits and blocks until the GPU is done.
@@ -87,6 +87,9 @@ public:
   // Copies the offscreen target (last rendered with TRANSFER_SRC final layout)
   // into `out`, tightly packed, 4 bytes per pixel.
   void read_back(std::span<std::byte> out);
+
+  // Number of distinct pipelines created so far (test-facing).
+  size_t pipeline_count() const;
 
 private:
   struct MeshSlot {
@@ -106,7 +109,7 @@ private:
   };
 
   Device _device;
-  VkFormat _color_format;
+  Shader _shader;
 
   VkCommandPool _command_pool{VK_NULL_HANDLE};
   VkCommandBuffer _command_buffer{VK_NULL_HANDLE};
@@ -124,8 +127,9 @@ private:
   VkDescriptorSetLayout _set1_layout{VK_NULL_HANDLE};
   VkDescriptorPool _set1_pool{VK_NULL_HANDLE};
 
-  VkPipelineLayout _pipeline_layout{VK_NULL_HANDLE};
-  VkPipeline _pipeline{VK_NULL_HANDLE};
+  VertexLayout _vertex_layout;
+  VkPipelineCache _vk_pipeline_cache{VK_NULL_HANDLE};
+  PipelineCache _pipelines;
 
   std::vector<MeshSlot> _meshes;
   std::vector<uint32_t> _free_meshes;

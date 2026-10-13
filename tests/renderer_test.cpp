@@ -34,8 +34,8 @@ class RendererTest : public ::testing::Test {
 protected:
   void SetUp() override {
     device = createDevice(DeviceDesc{});
-    renderer = std::make_unique<Renderer>(device, shaders_dir / "shader.slang",
-                                          VK_FORMAT_R8G8B8A8_SRGB);
+    renderer =
+        std::make_unique<Renderer>(device, shaders_dir / "shader.slang");
     target = renderer->create_offscreen_target({WIDTH, HEIGHT},
                                                VK_FORMAT_R8G8B8A8_SRGB);
 
@@ -320,4 +320,30 @@ TEST_F(RendererTest, ReleaseMeshWithLivePrimAsserts) {
   GTEST_FLAG_SET(death_test_style, "threadsafe");
   EXPECT_DEATH(renderer->release_mesh(mesh), "still references this mesh");
 #endif
+}
+
+TEST_F(RendererTest, PrimsSharingMeshAndSpirvShareOnePipeline) {
+  EXPECT_EQ(renderer->pipeline_count(), 0u);
+  renderer->render(target, frame);
+  EXPECT_EQ(renderer->pipeline_count(), 1u);
+}
+
+TEST_F(RendererTest, DifferentTargetFormatsCreateDifferentPipelines) {
+  VkFormatProperties format_properties{};
+  vkGetPhysicalDeviceFormatProperties(
+      device.physicalDevice, VK_FORMAT_B8G8R8A8_SRGB, &format_properties);
+  constexpr VkFormatFeatureFlags required =
+      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+  if ((format_properties.optimalTilingFeatures & required) != required) {
+    GTEST_SKIP() << "B8G8R8A8_SRGB cannot be used as an offscreen target on "
+                    "this device";
+  }
+
+  renderer->render(target, frame);
+  EXPECT_EQ(renderer->pipeline_count(), 1u);
+
+  RenderTarget bgra_target = renderer->create_offscreen_target(
+      {WIDTH, HEIGHT}, VK_FORMAT_B8G8R8A8_SRGB);
+  renderer->render(bgra_target, frame);
+  EXPECT_EQ(renderer->pipeline_count(), 2u);
 }
