@@ -89,10 +89,45 @@ FetchContent_Declare(
   URL_HASH SHA256=9445cf0b35332bfda055c9424e307f957ff58befb04c5b45b9f9f29894a41cf8)
 
 FetchContent_Declare(
+  MaterialX
+  GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/MaterialX.git
+  GIT_TAG v1.39.5
+  GIT_SHALLOW TRUE)
+
+# stb is header-only and untagged; pinned by commit.
+FetchContent_Declare(
+  stb
+  GIT_REPOSITORY https://github.com/nothings/stb.git
+  GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20)
+
+FetchContent_Declare(
   googletest
   GIT_REPOSITORY https://github.com/google/googletest.git
   GIT_TAG v1.17.0
   GIT_SHALLOW TRUE)
+
+foreach(
+  materialx_option
+  MATERIALX_BUILD_TESTS
+  MATERIALX_BUILD_VIEWER
+  MATERIALX_BUILD_GRAPH_EDITOR
+  MATERIALX_BUILD_PYTHON
+  MATERIALX_BUILD_JS
+  MATERIALX_BUILD_DOCS
+  MATERIALX_BUILD_RENDER
+  MATERIALX_BUILD_RENDER_PLATFORMS
+  MATERIALX_BUILD_GEN_GLSL
+  MATERIALX_BUILD_GEN_OSL
+  MATERIALX_BUILD_GEN_MDL
+  MATERIALX_BUILD_GEN_MSL
+  MATERIALX_INSTALL_PYTHON)
+  set(${materialx_option}
+      OFF
+      CACHE BOOL "" FORCE)
+endforeach()
+set(MATERIALX_BUILD_GEN_SLANG
+    ON
+    CACHE BOOL "" FORCE)
 
 set(INSTALL_GTEST
     OFF
@@ -112,7 +147,29 @@ FetchContent_MakeAvailable(
   ktx
   spdlog
   slang
+  MaterialX
+  stb
   googletest)
+
+add_library(stb INTERFACE)
+target_include_directories(stb SYSTEM INTERFACE ${stb_SOURCE_DIR})
+
+# MaterialX headers are third-party: treat them as system includes.
+foreach(
+  materialx_target
+  MaterialXCore
+  MaterialXFormat
+  MaterialXGenShader
+  MaterialXGenHw
+  MaterialXGenSlang)
+  get_target_property(MATERIALX_INCLUDE_DIRS ${materialx_target}
+                      INTERFACE_INCLUDE_DIRECTORIES)
+  if(MATERIALX_INCLUDE_DIRS)
+    set_target_properties(
+      ${materialx_target} PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
+                                     "${MATERIALX_INCLUDE_DIRS}")
+  endif()
+endforeach()
 
 find_package(slang CONFIG REQUIRED PATHS ${slang_SOURCE_DIR} NO_DEFAULT_PATH)
 set_target_properties(slang::slang PROPERTIES IMPORTED_GLOBAL TRUE)

@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<materialx version="1.39">
+  <standard_surface name="SR_clay" type="surfaceshader">
+    <input name="base" type="float" value="1.0" />
+    <input name="base_color" type="color3" value="0.72, 0.38, 0.26" />
+    <input name="diffuse_roughness" type="float" value="0.6" />
+    <input name="specular" type="float" value="0.1" />
+    <input name="specular_roughness" type="float" value="0.9" />
+  </standard_surface>
+  <surfacematerial name="M_clay" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_clay" />
+  </surfacematerial>
+</materialx>

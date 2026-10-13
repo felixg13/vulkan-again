@@ -3,10 +3,8 @@
 
 #include <array>
 #include <cassert>
-#include <cstring>
-#include <fstream>
+#include <format>
 #include <functional>
-#include <sstream>
 #include <string_view>
 
 ShaderCompiler createShaderCompiler() {
@@ -18,10 +16,20 @@ ShaderCompiler createShaderCompiler() {
       .format{SLANG_SPIRV},
       .profile{compiler.globalSession->findProfile("spirv_1_4")},
   }})};
-  auto slangOptions{std::to_array<slang::CompilerOptionEntry>({{
-      slang::CompilerOptionName::EmitSpirvDirectly,
-      {slang::CompilerOptionValueKind::Int, 1},
-  }})};
+  // Optimization HIGH. Measured on the generated MaterialX source in Step 5
+  // (unsanitized host): NONE ~92-97 KB, Slang's DEFAULT ~757 KB, HIGH
+  // ~96-98 KB, so DEFAULT is the outlier to avoid. In the ASan/UBSan Debug
+  // build the level has no effect on the output (sizes equal NONE).
+  // Warnings 31106/31107 ("member will leak into a separate binding slot")
+  // describe the SamplerTexture2D split the engine relies on, not a problem.
+  auto slangOptions{std::to_array<slang::CompilerOptionEntry>({
+      {slang::CompilerOptionName::EmitSpirvDirectly,
+       {slang::CompilerOptionValueKind::Int, 1}},
+      {slang::CompilerOptionName::Optimization,
+       {slang::CompilerOptionValueKind::Int, SLANG_OPTIMIZATION_LEVEL_HIGH}},
+      {slang::CompilerOptionName::DisableWarnings,
+       {slang::CompilerOptionValueKind::String, 0, 0, "31106,31107"}},
+  })};
   slang::SessionDesc slangSessionDesc{
       .targets{slangTargets.data()},
       .targetCount{SlangInt(slangTargets.size())},
@@ -44,34 +52,30 @@ void destroyShaderCompiler(ShaderCompiler &compiler) {
 }
 
 Shader compileShader(const ShaderCompiler &compiler, const std::string &moduleName,
-                     const std::filesystem::path &path) {
+                     const std::string &source) {
   Shader shader{};
 
-  std::ifstream file{path, std::ios::binary};
-  std::stringstream sourceStream;
-  sourceStream << file.rdbuf();
-  std::string source = sourceStream.str();
   Slang::ComPtr<ISlangBlob> sourceBlob;
   sourceBlob.attach(slang_createBlob(source.data(), source.size()));
 
   Slang::ComPtr<ISlangBlob> diagnostics;
   Slang::ComPtr<slang::IModule> slangModule{compiler.session->loadModuleFromSource(
-      moduleName.c_str(), path.string().c_str(), sourceBlob, diagnostics.writeRef())};
+      moduleName.c_str(), moduleName.c_str(), sourceBlob, diagnostics.writeRef())};
   if (!slangModule) {
-    SPDLOG_CRITICAL("Failed to load Slang shader module: {}: {}", path.string(),
+    SPDLOG_CRITICAL("Failed to load Slang shader module: {}: {}", moduleName,
                     diagnostics
                         ? static_cast<const char *>(diagnostics->getBufferPointer())
                         : "no diagnostics");
     abort();
   }
   if (diagnostics) {
-    SPDLOG_WARN("Slang diagnostics for {}: {}", path.string(),
+    SPDLOG_WARN("Slang diagnostics for {}: {}", moduleName,
                static_cast<const char *>(diagnostics->getBufferPointer()));
   }
 
   slangModule->getTargetCode(0, shader.spirv.writeRef());
   if (!shader.spirv) {
-    SPDLOG_CRITICAL("Failed to compile Slang shader to SPIR-V: {}", path.string());
+    SPDLOG_CRITICAL("Failed to compile Slang shader to SPIR-V: {}", moduleName);
     abort();
   }
 
@@ -102,7 +106,7 @@ Shader compileShader(const ShaderCompiler &compiler, const std::string &moduleNa
       SLANG_FAILED(composed->link(linked.writeRef(),
                                   reflectionDiagnostics.writeRef()))) {
     SPDLOG_CRITICAL("Failed to link Slang program for reflection: {}",
-                    path.string());
+                    moduleName);
     abort();
   }
   slang::ProgramLayout *programLayout = linked->getLayout(0);
@@ -126,15 +130,17 @@ Shader compileShader(const ShaderCompiler &compiler, const std::string &moduleNa
     Slang::ComPtr<slang::IMetadata> metadata;
     if (SLANG_FAILED(linked->getEntryPointMetadata(
             static_cast<SlangInt>(i), 0, metadata.writeRef(), nullptr))) {
-      SPDLOG_CRITICAL("Failed to get entry point metadata: {}", path.string());
+      SPDLOG_CRITICAL("Failed to get entry point metadata: {}", moduleName);
       abort();
     }
     stageMetadata.emplace_back(stageBit, metadata);
   }
 
+  // Space-1 parameters: the material cbuffer, with its uniform data and the
+  // texture/sampler pairs nested in it (MaterialX declares everything inside
+  // one `cbuffer`, which the preamble in material.cpp moves to set 1). Every
+  // offset below comes from reflection; nothing is hard-coded.
   bool foundUbo{false};
-  bool foundBaseColorFactor{false};
-  bool foundLightDir{false};
   for (unsigned i = 0; i < programLayout->getParameterCount(); i++) {
     slang::VariableLayoutReflection *parameter =
         programLayout->getParameterByIndex(i);
@@ -143,27 +149,122 @@ Shader compileShader(const ShaderCompiler &compiler, const std::string &moduleNa
       continue;
     }
     slang::TypeLayoutReflection *typeLayout = parameter->getTypeLayout();
-    assert(typeLayout->getBindingRangeCount() == 1 &&
-           "set 1 parameters are expected to be single-range");
-    ReflectedBinding binding{.binding = parameter->getBindingIndex(),
-                             .count = static_cast<uint32_t>(
-                                 typeLayout->getBindingRangeBindingCount(0))};
-    switch (typeLayout->getBindingRangeType(0)) {
-    case slang::BindingType::ConstantBuffer:
-      binding.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-      break;
-    case slang::BindingType::CombinedTextureSampler:
-      binding.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-      break;
-    case slang::BindingType::Texture:
-      binding.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-      break;
-    case slang::BindingType::Sampler:
-      binding.type = VK_DESCRIPTOR_TYPE_SAMPLER;
-      break;
-    default:
-      assert(!"unsupported set 1 binding type");
+    assert(typeLayout->getKind() == slang::TypeReflection::Kind::ConstantBuffer &&
+           "set 1 is expected to hold exactly one constant buffer");
+    assert(!foundUbo && "more than one constant buffer in set 1");
+    foundUbo = true;
+    // Descriptor slots are relative to the parameter's own binding index.
+    const uint32_t base = parameter->getBindingIndex();
+    slang::TypeLayoutReflection *blockLayout = typeLayout->getElementTypeLayout();
+    shader.material.ubo_binding = base;
+    shader.material.ubo_size = static_cast<uint32_t>(
+        blockLayout->getSize(slang::ParameterCategory::Uniform));
+    shader.material.set1_bindings.push_back(
+        {.binding = base, .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER});
+
+    // UBO fields: worklist over struct members and array elements until only
+    // scalar/vector/matrix leaves remain.
+    struct Pending {
+      std::string name;
+      slang::TypeLayoutReflection *layout;
+      size_t offset;
+    };
+    std::vector<Pending> pending{};
+    for (unsigned f = 0; f < blockLayout->getFieldCount(); f++) {
+      slang::VariableLayoutReflection *field = blockLayout->getFieldByIndex(f);
+      pending.push_back(
+          {field->getName(), field->getTypeLayout(),
+           field->getOffset(slang::ParameterCategory::Uniform)});
     }
+    while (!pending.empty()) {
+      Pending item = std::move(pending.back());
+      pending.pop_back();
+      slang::TypeLayoutReflection *layout = item.layout;
+      if (layout->getSize(slang::ParameterCategory::Uniform) == 0) {
+        continue; // resource or empty: handled below / nothing to write
+      }
+      switch (layout->getKind()) {
+      case slang::TypeReflection::Kind::Struct:
+        for (unsigned f = 0; f < layout->getFieldCount(); f++) {
+          slang::VariableLayoutReflection *member = layout->getFieldByIndex(f);
+          pending.push_back(
+              {std::format("{}.{}", item.name, member->getName()),
+               member->getTypeLayout(),
+               item.offset +
+                   member->getOffset(slang::ParameterCategory::Uniform)});
+        }
+        break;
+      case slang::TypeReflection::Kind::Array: {
+        slang::TypeLayoutReflection *element = layout->getElementTypeLayout();
+        size_t stride = layout->getElementStride(SLANG_PARAMETER_CATEGORY_UNIFORM);
+        for (size_t e = 0; e < layout->getElementCount(); e++) {
+          pending.push_back({std::format("{}[{}]", item.name, e), element,
+                             item.offset + e * stride});
+        }
+        break;
+      }
+      default:
+        shader.material.ubo_fields.push_back(
+            {.name = item.name,
+             .offset = static_cast<uint32_t>(item.offset),
+             .size = static_cast<uint32_t>(
+                 layout->getSize(slang::ParameterCategory::Uniform))});
+        break;
+      }
+    }
+
+    // Texture/sampler pairs: the block's members that consume descriptor
+    // slots. Each is a struct of one texture and one sampler.
+    for (unsigned f = 0; f < blockLayout->getFieldCount(); f++) {
+      slang::VariableLayoutReflection *field = blockLayout->getFieldByIndex(f);
+      slang::TypeLayoutReflection *fieldLayout = field->getTypeLayout();
+      if (fieldLayout->getSize(slang::ParameterCategory::DescriptorTableSlot) ==
+          0) {
+        continue;
+      }
+      assert(fieldLayout->getKind() == slang::TypeReflection::Kind::Struct &&
+             "set 1 resources are expected to be texture/sampler structs");
+      const uint32_t field_slot = base + static_cast<uint32_t>(field->getOffset(
+                                             slang::ParameterCategory::DescriptorTableSlot));
+      ReflectedResource resource{.name = field->getName()};
+      bool foundImage{false};
+      bool foundSampler{false};
+      for (unsigned m = 0; m < fieldLayout->getFieldCount(); m++) {
+        slang::VariableLayoutReflection *member = fieldLayout->getFieldByIndex(m);
+        slang::TypeLayoutReflection *memberLayout = member->getTypeLayout();
+        const uint32_t slot =
+            field_slot + static_cast<uint32_t>(member->getOffset(
+                             slang::ParameterCategory::DescriptorTableSlot));
+        if (memberLayout->getKind() == slang::TypeReflection::Kind::Resource) {
+          assert(memberLayout->getResourceShape() == SLANG_TEXTURE_2D &&
+                 "only 2D sampled textures are supported");
+          resource.image_binding = slot;
+          foundImage = true;
+        } else if (memberLayout->getKind() ==
+                   slang::TypeReflection::Kind::SamplerState) {
+          resource.sampler_binding = slot;
+          foundSampler = true;
+        } else {
+          assert(!"unsupported member in a set 1 resource struct");
+        }
+      }
+      assert(foundImage && foundSampler && "texture without its sampler");
+      (void)foundImage;
+      (void)foundSampler;
+      shader.material.resources.push_back(resource);
+      shader.material.set1_bindings.push_back(
+          {.binding = resource.image_binding,
+           .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE});
+      shader.material.set1_bindings.push_back(
+          {.binding = resource.sampler_binding,
+           .type = VK_DESCRIPTOR_TYPE_SAMPLER});
+    }
+  }
+  assert(foundUbo && "no UBO in set 1");
+  (void)foundUbo;
+
+  // Which stages actually use each binding.
+  for (ReflectedBinding &binding : shader.material.set1_bindings) {
     for (const auto &[stageBit, metadata] : stageMetadata) {
       bool used{false};
       metadata->isParameterLocationUsed(SLANG_PARAMETER_CATEGORY_DESCRIPTOR_TABLE_SLOT,
@@ -172,40 +273,7 @@ Shader compileShader(const ShaderCompiler &compiler, const std::string &moduleNa
         binding.stages |= stageBit;
       }
     }
-    shader.material.set1_bindings.push_back(binding);
-
-    if (binding.type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || foundUbo) {
-      continue;
-    }
-    // Material UBO: look the engine-written fields up by name.
-    foundUbo = true;
-    slang::TypeLayoutReflection *blockLayout = typeLayout->getElementTypeLayout();
-    shader.material.ubo_binding = binding.binding;
-    shader.material.ubo_size = static_cast<uint32_t>(
-        blockLayout->getSize(slang::ParameterCategory::Uniform));
-    for (unsigned f = 0; f < blockLayout->getFieldCount(); f++) {
-      slang::VariableLayoutReflection *field = blockLayout->getFieldByIndex(f);
-      auto offset = static_cast<uint32_t>(
-          field->getOffset(slang::ParameterCategory::Uniform));
-      auto size = static_cast<uint32_t>(
-          field->getTypeLayout()->getSize(slang::ParameterCategory::Uniform));
-      if (std::strcmp(field->getName(), "base_color_factor") == 0) {
-        foundBaseColorFactor = true;
-        shader.material.base_color_factor_offset = offset;
-        shader.material.base_color_factor_size = size;
-      } else if (std::strcmp(field->getName(), "light_dir") == 0) {
-        foundLightDir = true;
-        shader.material.light_dir_offset = offset;
-        shader.material.light_dir_size = size;
-      }
-    }
   }
-  assert(foundUbo && "no UBO in set 1");
-  assert(foundBaseColorFactor && "material UBO has no field base_color_factor");
-  assert(foundLightDir && "material UBO has no field light_dir");
-  (void)foundBaseColorFactor;
-  (void)foundLightDir;
-  (void)foundUbo;
 
   SPDLOG_INFO("Compiled shader '{}' to SPIR-V ({} bytes)", moduleName,
              shader.spirv->getBufferSize());

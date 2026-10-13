@@ -39,9 +39,8 @@ struct PerFrameData {
   // render() normalizes it before it reaches the UBO. The default lights the
   // scene from above (world +y is screen-down, see load_model's y flip) and
   // slightly from the camera side (camera looks down -z).
-  // Step 5 mirrors this field into each material's `u_lightData`
-  // (direction/color/intensity); do not change the convention without
-  // updating that mapping.
+  // render() mirrors this field into each material's `u_lightData[0].direction`
+  // (MaterialX's convention is the same: the direction light travels).
   glm::vec4 light_dir{0.0f, 1.0f, -0.5f, 0.0f};
 };
 
@@ -69,10 +68,17 @@ public:
   MeshHandle add_mesh(const MeshData &mesh);
   void release_mesh(MeshHandle mesh);
 
-  // Compiles the shader, builds set 1 from reflection, creates the params UBO
-  // with `base_color` and pre-warms the pipeline when a target format is
-  // known. Step 5 replaces this with compile_material (MaterialX); remove then.
-  MaterialHandle compile_material_from_color(const glm::vec4 &base_color);
+  // MaterialX document -> Slang -> SPIR-V -> reflection -> set 1; pre-warms
+  // the pipeline when a target format is known. The first renderable element
+  // is used. This is the Hydra boundary (hdMtlx produces the document).
+  // Throws std::runtime_error with a message naming the cause when the
+  // document has no renderable element, generation fails or a texture cannot
+  // be loaded.
+  MaterialHandle compile_material(MaterialX::DocumentPtr document);
+  // Reads the .mtlx at `path` (texture paths inside it resolve relative to
+  // the file) and calls compile_material. Throws std::runtime_error for an
+  // unreadable or malformed file.
+  MaterialHandle compile_material_from_file(const std::filesystem::path &path);
   // Frees the UBO and descriptor set. Releasing a material a live
   // prim references is a contract violation (assert).
   void release_material(MaterialHandle material);

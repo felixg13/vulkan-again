@@ -6,7 +6,12 @@
 #include <array>
 #include <cassert>
 #include <cstring>
+#include <MaterialXFormat/XmlIo.h>
+
+#include <format>
 #include <fstream>
+#include <iterator>
+#include <stdexcept>
 #include <spdlog/spdlog.h>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -231,14 +236,17 @@ void Renderer::release_mesh(MeshHandle mesh) {
   _free_meshes.push_back(mesh.index);
 }
 
-MaterialHandle Renderer::compile_material_from_color(
-    const glm::vec4 &base_color) {
-  // SHADER (reflection is collected before the Slang session is destroyed)
-  ShaderCompiler shader_compiler = createShaderCompiler();
-  Shader shader = compileShader(shader_compiler, "shader", _shader_path);
-  destroyShaderCompiler(shader_compiler);
+MaterialHandle Renderer::compile_material(MaterialX::DocumentPtr document) {
+  // ENGINE VERTEX STAGE: concatenated into every material's module
+  std::ifstream vertex_file{_shader_path, std::ios::binary};
+  if (!vertex_file) {
+    throw std::runtime_error(std::format("cannot read the engine vertex stage '{}'",
+                                         _shader_path.string()));
+  }
+  std::string vertex_source{std::istreambuf_iterator<char>(vertex_file),
+                            std::istreambuf_iterator<char>()};
 
-  MaterialHandle handle = _materials.compile(shader, base_color);
+  MaterialHandle handle = _materials.compile(document, vertex_source);
 
   // PRE-WARM: only possible once a target format is known; otherwise the
   // first render creates the pipeline.
@@ -252,6 +260,18 @@ MaterialHandle Renderer::compile_material_from_color(
     material.pipeline_layout = pipeline.layout;
   }
   return handle;
+}
+
+MaterialHandle Renderer::compile_material_from_file(
+    const std::filesystem::path &path) {
+  MaterialX::DocumentPtr document = MaterialX::createDocument();
+  try {
+    MaterialX::readFromXmlFile(document, MaterialX::FilePath{path.string()});
+  } catch (const MaterialX::Exception &error) {
+    throw std::runtime_error(std::format("cannot read MaterialX file '{}': {}",
+                                         path.string(), error.what()));
+  }
+  return compile_material(document);
 }
 
 void Renderer::release_material(MaterialHandle material) {
@@ -391,14 +411,21 @@ void Renderer::render(const RenderTarget &target, const PerFrameData &frame,
   std::memcpy(_per_frame_buffers[_frame_index].pMappedData, &frame_data,
               sizeof(PerFrameData));
 
-  // MATERIAL MIRROR: light_dir into every live material's UBO
+  // MATERIAL MIRROR: camera world position and light direction into every
+  // live material's UBO (MaterialX keeps both in the material block, F1).
+  // u_lightData[0].direction is the direction light travels (the generated
+  // code negates it to get L), which is the engine convention: no negation.
+  const glm::vec3 view_position{glm::inverse(frame.view)[3]};
+  const glm::vec3 light_direction{frame_data.light_dir};
   for (auto &slot : _materials._slots) {
     if (!slot.live) {
       continue;
     }
-    std::memcpy(static_cast<std::byte *>(slot.material.params_ubo.pMappedData) +
-                    slot.material.light_dir_offset,
-                glm::value_ptr(frame_data.light_dir), sizeof(glm::vec4));
+    auto *ubo = static_cast<std::byte *>(slot.material.params_ubo.pMappedData);
+    std::memcpy(ubo + slot.material.view_position_offset,
+                glm::value_ptr(view_position), sizeof(glm::vec3));
+    std::memcpy(ubo + slot.material.light_direction_offset,
+                glm::value_ptr(light_direction), sizeof(glm::vec3));
   }
 
   // RECORD

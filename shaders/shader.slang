@@ -1,3 +1,7 @@
+// Engine-owned vertex stage. The renderer concatenates this file after the
+// MaterialX-generated pixel source and the per-material adapter (which defines
+// `pixel_main` and consumes EngineVaryings), so everything here shares one
+// module with generated code: keep the names below distinct from MaterialX's.
 struct VSInput {
     float3 Pos;
     float3 Normal;
@@ -15,46 +19,25 @@ struct PerDrawData {
     float4x4 transform;
 };
 
-struct MaterialParams {
-    float4 base_color_factor;
-    // World-space direction the light travels (unit vector, w = 0). Mirrored
-    // in by the renderer every frame.
-    float4 light_dir;
-};
-
 [[vk::binding(0, 0)]] ConstantBuffer<PerFrameData> per_frame;
-[[vk::binding(0, 1)]] ConstantBuffer<MaterialParams> material;
 
-struct VSOutput {
-    float4 Pos : SV_POSITION;
-    float3 Normal;
-    float2 UV;
-    float3 ViewVec;
+// World-space position and normal: MaterialX's generated code shades in world
+// space (normalWorld / positionWorld / u_viewPosition).
+struct EngineVaryings {
+    float4 position : SV_Position;
+    [[vk::location(0)]] float3 world_position;
+    [[vk::location(1)]] float3 world_normal;
+    [[vk::location(2)]] float2 uv;
 };
 
 [shader("vertex")]
-VSOutput main(VSInput input, uniform PerDrawData *per_draw) {
-    VSOutput output;
-    float4x4 modelMat = per_draw->transform;
-    output.Normal = mul((float3x3)mul(per_frame.view, modelMat), input.Normal);
-    output.UV = input.UV;
-    output.Pos = mul(per_frame.projection, mul(per_frame.view, mul(modelMat, float4(input.Pos.xyz, 1.0))));
-    // Calculate view vectors required for lighting
-    float4 fragPos = mul(mul(per_frame.view, modelMat), float4(input.Pos.xyz, 1.0));
-    output.ViewVec = -fragPos.xyz;
+EngineVaryings main(VSInput input, uniform PerDrawData *per_draw) {
+    EngineVaryings output;
+    float4x4 model = per_draw->transform;
+    float4 world = mul(model, float4(input.Pos, 1.0));
+    output.world_position = world.xyz;
+    output.world_normal = mul((float3x3)model, input.Normal);
+    output.uv = input.UV;
+    output.position = mul(per_frame.projection, mul(per_frame.view, world));
     return output;
-}
-
-[shader("fragment")]
-float4 main(VSOutput input) {
-    // Phong lighting
-    float3 N = normalize(input.Normal);
-    float3 light_dir_view = mul(per_frame.view, float4(material.light_dir.xyz, 0.0)).xyz;
-    float3 L = normalize(-light_dir_view);
-    float3 V = normalize(input.ViewVec);
-    float3 R = reflect(-L, N);
-    float3 diffuse = max(dot(N, L), 0.0025);
-    float3 specular = pow(max(dot(R, V), 0.0), 16.0) * 0.75;
-    float3 color = material.base_color_factor.rgb;
-    return float4(diffuse * color.rgb + specular, 1.0);
 }

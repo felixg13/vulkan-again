@@ -2,6 +2,8 @@
 #include <device.h>
 #include <renderer.h>
 
+#include <MaterialXCore/Document.h>
+
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <gtest/gtest.h>
@@ -11,6 +13,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
+#include <stdexcept>
 #include <memory>
 #include <utility>
 #include <string>
@@ -22,17 +26,17 @@ constexpr uint32_t WIDTH = 320;
 constexpr uint32_t HEIGHT = 180;
 constexpr int CHANNEL_TOLERANCE = 4;
 
-const std::array<glm::vec4, 3> base_colors{
-    glm::vec4(0.80f, 0.45f, 0.35f, 1.0f), glm::vec4(1.00f, 0.77f, 0.34f, 1.0f),
-    glm::vec4(0.30f, 0.50f, 0.90f, 1.0f)};
-
 const std::filesystem::path assets_dir =
     std::filesystem::path(PROJECT_SOURCE_DIR) / "assets";
+const std::array<std::filesystem::path, 3> material_files{
+    assets_dir / "materials" / "mat_clay.mtlx",
+    assets_dir / "materials" / "mat_metal.mtlx",
+    assets_dir / "materials" / "mat_emissive.mtlx"};
 const std::filesystem::path shaders_dir =
     std::filesystem::path(PROJECT_SOURCE_DIR) / "shaders";
 const std::filesystem::path reference_path =
     std::filesystem::path(PROJECT_SOURCE_DIR) / "tests" / "reference" /
-    "three_suzannes.png";
+    "three_suzannes_mtlx.png";
 
 class RendererTest : public ::testing::Test {
 protected:
@@ -53,7 +57,7 @@ protected:
                                    0.0f)) *
           glm::mat4_cast(glm::quat(
               glm::vec3(0.2f, 0.5f * (static_cast<float>(i) - 1.0f), 0.0f)));
-      materials[i] = renderer->compile_material_from_color(base_colors[i]);
+      materials[i] = renderer->compile_material_from_file(material_files[i]);
       prims[i] = renderer->add_prim(mesh, materials[i], prim_transforms[i]);
     }
 
@@ -326,12 +330,12 @@ TEST_F(RendererTest, ReleaseMeshWithLivePrimAsserts) {
 #endif
 }
 
-TEST_F(RendererTest, PrimsSharingMeshAndSpirvShareOnePipeline) {
-  // The fixture creates the target before compiling materials, so the first
-  // material compile already pre-warmed the one pipeline.
-  EXPECT_EQ(renderer->pipeline_count(), 1u);
+TEST_F(RendererTest, ThreeDistinctMaterialsCreateThreePipelines) {
+  // The fixture creates the target before compiling materials, so each
+  // compile already pre-warmed its pipeline.
+  EXPECT_EQ(renderer->pipeline_count(), 3u);
   renderer->render(target, frame);
-  EXPECT_EQ(renderer->pipeline_count(), 1u);
+  EXPECT_EQ(renderer->pipeline_count(), 3u);
 }
 
 TEST_F(RendererTest, DifferentTargetFormatsCreateDifferentPipelines) {
@@ -346,21 +350,59 @@ TEST_F(RendererTest, DifferentTargetFormatsCreateDifferentPipelines) {
   }
 
   renderer->render(target, frame);
-  EXPECT_EQ(renderer->pipeline_count(), 1u);
+  EXPECT_EQ(renderer->pipeline_count(), 3u);
 
   RenderTarget bgra_target = renderer->create_offscreen_target(
       {WIDTH, HEIGHT}, VK_FORMAT_B8G8R8A8_SRGB);
   renderer->render(bgra_target, frame);
-  EXPECT_EQ(renderer->pipeline_count(), 2u);
+  EXPECT_EQ(renderer->pipeline_count(), 6u);
 }
 
-TEST_F(RendererTest, ThreeMaterialsFromOneShaderShareOnePipeline) {
-  // Three more materials from the same shader; the fixture already holds three.
-  for (size_t i = 0; i < 3; i++) {
-    renderer->compile_material_from_color(base_colors[i]);
+TEST_F(RendererTest, SameMtlxCompiledTwiceSharesOnePipeline) {
+  // The fixture already compiled each file once. Compiling them again must
+  // produce byte-identical SPIR-V (same hash), hence no new pipeline.
+  ASSERT_EQ(renderer->pipeline_count(), 3u);
+  for (const auto &file : material_files) {
+    renderer->compile_material_from_file(file);
   }
   renderer->render(target, frame);
-  EXPECT_EQ(renderer->pipeline_count(), 1u);
+  EXPECT_EQ(renderer->pipeline_count(), 3u);
+}
+
+TEST_F(RendererTest, UnreadableOrEmptyMaterialFailsWithAMessage) {
+  const auto message_of = [&](auto &&compile) {
+    try {
+      compile();
+    } catch (const std::runtime_error &error) {
+      return std::string{error.what()};
+    }
+    return std::string{};
+  };
+
+  std::string missing = message_of([&] {
+    renderer->compile_material_from_file(assets_dir / "materials" /
+                                         "does_not_exist.mtlx");
+  });
+  EXPECT_NE(missing.find("does_not_exist.mtlx"), std::string::npos) << missing;
+
+  const std::filesystem::path malformed_path =
+      std::filesystem::temp_directory_path() / "renderer_test_malformed.mtlx";
+  {
+    std::ofstream malformed{malformed_path};
+    malformed << "<?xml version=\"1.0\"?><materialx version=\"1.39\"><oops";
+  }
+  std::string malformed = message_of(
+      [&] { renderer->compile_material_from_file(malformed_path); });
+  std::filesystem::remove(malformed_path);
+  EXPECT_NE(malformed.find("renderer_test_malformed.mtlx"), std::string::npos)
+      << malformed;
+
+  std::string empty = message_of(
+      [&] { renderer->compile_material(MaterialX::createDocument()); });
+  EXPECT_NE(empty.find("no renderable element"), std::string::npos) << empty;
+
+  // None of the failures allocated a material or a pipeline.
+  EXPECT_EQ(renderer->pipeline_count(), 3u);
 }
 
 TEST_F(RendererTest, StaleHandleAfterReleaseMaterialAsserts) {
@@ -368,8 +410,7 @@ TEST_F(RendererTest, StaleHandleAfterReleaseMaterialAsserts) {
   GTEST_SKIP() << "assert() is compiled out";
 #else
   GTEST_FLAG_SET(death_test_style, "threadsafe");
-  MaterialHandle extra =
-      renderer->compile_material_from_color(base_colors[0]);
+  MaterialHandle extra = renderer->compile_material_from_file(material_files[0]);
   renderer->release_material(extra);
   EXPECT_DEATH(renderer->add_prim(mesh, extra, glm::mat4(1.0f)),
                "stale or invalid MaterialHandle");
@@ -395,7 +436,7 @@ TEST_F(RendererTest, ReleasedMaterialSlotIsReusedAndRenderIsUnchanged) {
   renderer->remove_prim(prims[0]);
   renderer->release_material(materials[0]);
   MaterialHandle replacement =
-      renderer->compile_material_from_color(base_colors[0]);
+      renderer->compile_material_from_file(material_files[0]);
   EXPECT_EQ(replacement.index, materials[0].index);
   EXPECT_NE(replacement.generation, materials[0].generation);
   PrimHandle prim =
@@ -434,6 +475,10 @@ TEST_F(RendererTest, LightDirectionIsMirroredIntoMaterialsEveryFrame) {
       over_tolerance++;
     }
   }
+  std::cout << "[ measured ] light mirror: " << over_tolerance << " of "
+            << from_above.size()
+            << " channel values differ by more than " << CHANNEL_TOLERANCE
+            << " (max per-channel difference " << max_diff << ")\n";
   EXPECT_GT(over_tolerance, 1000u)
       << "max per-channel difference " << max_diff << " (tolerance "
       << CHANNEL_TOLERANCE << ")";

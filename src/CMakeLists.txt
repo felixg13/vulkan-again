@@ -24,7 +24,8 @@ target_compile_features(vulkan_engine_lib PUBLIC cxx_std_23)
 target_include_directories(vulkan_engine_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(
   vulkan_engine_lib PRIVATE
-  PIPELINE_CACHE_PATH="${CMAKE_BINARY_DIR}/pipeline_cache.bin")
+  PIPELINE_CACHE_PATH="${CMAKE_BINARY_DIR}/pipeline_cache.bin"
+  MATERIALX_LIBRARIES_PATH="${MaterialX_SOURCE_DIR}/libraries")
 
 target_link_libraries(
   vulkan_engine_lib
@@ -36,6 +37,12 @@ target_link_libraries(
          tinyobjloader
          ktx_read
          slang::slang
+         MaterialXCore
+         MaterialXFormat
+         MaterialXGenShader
+         MaterialXGenHw
+         MaterialXGenSlang
+         stb
   PRIVATE vk-bootstrap::vk-bootstrap)
 
 include(CompilerWarnings)
