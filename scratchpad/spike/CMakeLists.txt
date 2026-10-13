@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.24)
+project(spike CXX)
+set(CMAKE_CXX_STANDARD 17)
+find_package(MaterialX CONFIG REQUIRED PATHS $ENV{MX_PREFIX} NO_DEFAULT_PATH)
+add_executable(gen gen.cpp)
+target_link_libraries(gen PRIVATE MaterialXGenSlang MaterialXGenHw MaterialXGenShader MaterialXFormat MaterialXCore)

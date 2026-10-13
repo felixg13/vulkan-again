@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<materialx version="1.39">
+  <image name="tex_base" type="color3">
+    <input name="file" type="filename" value="suzanne0.png" colorspace="srgb_texture" />
+  </image>
+  <standard_surface name="SR_tex" type="surfaceshader">
+    <input name="base" type="float" value="1.0" />
+    <input name="base_color" type="color3" nodename="tex_base" />
+    <input name="specular_roughness" type="float" value="0.4" />
+  </standard_surface>
+  <surfacematerial name="M_tex" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_tex" />
+  </surfacematerial>
+</materialx>

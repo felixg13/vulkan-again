@@ -31,9 +31,10 @@ constexpr int DEFAULT_HEIGHT = 900;
 VkCommandPool commandPool{VK_NULL_HANDLE};
 std::array<VkCommandBuffer, MAX_FRAMES_IN_FLIGHT> commandBuffers;
 VkSwapchainKHR swapchain{VK_NULL_HANDLE};
+VkDescriptorSetLayout descriptorSetLayoutFrame{VK_NULL_HANDLE};
 VkDescriptorSetLayout descriptorSetLayoutTex{VK_NULL_HANDLE};
 VkDescriptorPool descriptorPool{VK_NULL_HANDLE};
-VkDescriptorSet descriptorSetTex{VK_NULL_HANDLE};
+std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> descriptorSetsFrame{};
 VkPipelineLayout pipelineLayout{VK_NULL_HANDLE};
 VkPipeline pipeline{VK_NULL_HANDLE};
 std::vector<VkImage> swapchainImages;
@@ -41,12 +42,20 @@ std::vector<VkImageView> swapchainImageViews;
 std::array<Texture, TEXTURE_COUNT> textures{};
 double scrollOffsetY{0.0};
 
-struct ShaderData {
+struct PerFrameData {
   glm::mat4 projection;
   glm::mat4 view;
-  glm::mat4 model[3];
-  glm::vec4 lightPos{0.0f, -10.0f, 10.0f, 0.0f};
-  uint32_t selected{1};
+  glm::vec4 light_dir{0.0f, -10.0f, 10.0f, 0.0f};
+};
+
+struct PerDrawData {
+  glm::mat4 transform;
+};
+
+struct DrawablePrim {
+  uint32_t prim_index;
+  uint32_t mesh_index;
+  VkDescriptorSet texture_desc_set;
 };
 
 const std::filesystem::path assetsDir =
@@ -169,23 +178,33 @@ int main() {
                             .usageFlags = VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                             .pContents = suzanneIndices.data()});
 
+  // MESH TABLE (indexed by DrawablePrim::mesh_index)
+  std::array<Buffer, 1> meshVertexBuffers{suzanneVertexBuffer};
+  std::array<Buffer, 1> meshIndexBuffers{suzanneIndicesBuffer};
+  std::array<uint32_t, 1> meshIndexCounts{
+      static_cast<uint32_t>(suzanneIndices.size())};
+
   // SHADER LOADING
   ShaderCompiler shaderCompiler = createShaderCompiler();
   Shader shader =
       compileShader(shaderCompiler, "shader", shadersDir / "shader.slang");
 
-  // SHADER DATA BUFFER
-  std::vector<std::pair<Buffer, VkDeviceAddress>> shaderDataBuffers(
-      MAX_FRAMES_IN_FLIGHT);
+  // PER-FRAME UBOS (set 0) AND TRANSFORM BUFFERS (BDA), ONE PER FRAME IN FLIGHT
+  std::array<Buffer, MAX_FRAMES_IN_FLIGHT> perFrameBuffers{};
+  std::array<Buffer, MAX_FRAMES_IN_FLIGHT> transformBuffers{};
+  std::array<VkDeviceAddress, MAX_FRAMES_IN_FLIGHT> transformAddresses{};
   for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-    shaderDataBuffers[i].first = createBuffer(
-        device, {.size = sizeof(ShaderData),
+    perFrameBuffers[i] =
+        createBuffer(device, {.size = sizeof(PerFrameData),
+                              .usageFlags = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT});
+    transformBuffers[i] = createBuffer(
+        device, {.size = sizeof(PerDrawData) * TEXTURE_COUNT,
                  .usageFlags = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT});
-    VkBufferDeviceAddressInfo uBufferBdaInfo{
+    VkBufferDeviceAddressInfo transformBdaInfo{
         .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-        .buffer = shaderDataBuffers[i].first.resource};
-    shaderDataBuffers[i].second =
-        vkGetBufferDeviceAddress(device.device, &uBufferBdaInfo);
+        .buffer = transformBuffers[i].resource};
+    transformAddresses[i] =
+        vkGetBufferDeviceAddress(device.device, &transformBdaInfo);
   }
 
   // SYNC STRUCTURE
@@ -331,67 +350,99 @@ int main() {
     ktxTexture_Destroy(pKtxTexture);
   }
 
+  // DESCRIPTORS: set 0 = per-frame UBO, set 1 = base color texture per prim
+  std::array<DrawablePrim, TEXTURE_COUNT> prims{};
   {
-    VkDescriptorBindingFlags descVariableFlag{
-        VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT};
-    VkDescriptorSetLayoutBindingFlagsCreateInfo descBindingFlags{
-        .sType =
-            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
+    VkDescriptorSetLayoutBinding descLayoutBindingFrame{
+        .binding = 0,
+        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT};
+    VkDescriptorSetLayoutCreateInfo descLayoutFrameCI{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .bindingCount = 1,
-        .pBindingFlags = &descVariableFlag};
+        .pBindings = &descLayoutBindingFrame};
+    utils::validation::chk(vkCreateDescriptorSetLayout(
+        device.device, &descLayoutFrameCI, nullptr, &descriptorSetLayoutFrame));
     VkDescriptorSetLayoutBinding descLayoutBindingTex{
+        .binding = 0,
         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = static_cast<uint32_t>(textures.size()),
+        .descriptorCount = 1,
         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT};
     VkDescriptorSetLayoutCreateInfo descLayoutTexCI{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .pNext = &descBindingFlags,
         .bindingCount = 1,
         .pBindings = &descLayoutBindingTex};
     utils::validation::chk(vkCreateDescriptorSetLayout(
         device.device, &descLayoutTexCI, nullptr, &descriptorSetLayoutTex));
-    VkDescriptorPoolSize poolSize{
-        .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = static_cast<uint32_t>(textures.size())};
+
+    std::array<VkDescriptorPoolSize, 2> poolSizes{
+        VkDescriptorPoolSize{.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                             .descriptorCount = MAX_FRAMES_IN_FLIGHT},
+        VkDescriptorPoolSize{.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                             .descriptorCount = TEXTURE_COUNT}};
     VkDescriptorPoolCreateInfo descPoolCI{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = 1,
-        .poolSizeCount = 1,
-        .pPoolSizes = &poolSize};
+        .maxSets = MAX_FRAMES_IN_FLIGHT + TEXTURE_COUNT,
+        .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
+        .pPoolSizes = poolSizes.data()};
     utils::validation::chk(vkCreateDescriptorPool(device.device, &descPoolCI,
                                                   nullptr, &descriptorPool));
-    uint32_t variableDescCount{static_cast<uint32_t>(textures.size())};
-    VkDescriptorSetVariableDescriptorCountAllocateInfo variableDescCountAI{
-        .sType =
-            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO_EXT,
-        .descriptorSetCount = 1,
-        .pDescriptorCounts = &variableDescCount};
-    VkDescriptorSetAllocateInfo texDescSetAlloc{
 
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .pNext = &variableDescCountAI,
-        .descriptorPool = descriptorPool,
-        .descriptorSetCount = 1,
-        .pSetLayouts = &descriptorSetLayoutTex};
-    utils::validation::chk(vkAllocateDescriptorSets(
-        device.device, &texDescSetAlloc, &descriptorSetTex));
-    VkWriteDescriptorSet writeDescSet{
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = descriptorSetTex,
-        .dstBinding = 0,
-        .descriptorCount = static_cast<uint32_t>(textureDescriptors.size()),
-        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .pImageInfo = textureDescriptors.data()};
-    vkUpdateDescriptorSets(device.device, 1, &writeDescSet, 0, nullptr);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+      VkDescriptorSetAllocateInfo frameDescSetAlloc{
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+          .descriptorPool = descriptorPool,
+          .descriptorSetCount = 1,
+          .pSetLayouts = &descriptorSetLayoutFrame};
+      utils::validation::chk(vkAllocateDescriptorSets(
+          device.device, &frameDescSetAlloc, &descriptorSetsFrame[i]));
+      VkDescriptorBufferInfo perFrameBufferInfo{
+          .buffer = perFrameBuffers[i].resource,
+          .offset = 0,
+          .range = sizeof(PerFrameData)};
+      VkWriteDescriptorSet writeFrameDescSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = descriptorSetsFrame[i],
+          .dstBinding = 0,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .pBufferInfo = &perFrameBufferInfo};
+      vkUpdateDescriptorSets(device.device, 1, &writeFrameDescSet, 0, nullptr);
+    }
+
+    for (size_t i = 0; i < prims.size(); i++) {
+      VkDescriptorSetAllocateInfo texDescSetAlloc{
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+          .descriptorPool = descriptorPool,
+          .descriptorSetCount = 1,
+          .pSetLayouts = &descriptorSetLayoutTex};
+      VkDescriptorSet texDescSet{VK_NULL_HANDLE};
+      utils::validation::chk(vkAllocateDescriptorSets(
+          device.device, &texDescSetAlloc, &texDescSet));
+      VkWriteDescriptorSet writeTexDescSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = texDescSet,
+          .dstBinding = 0,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+          .pImageInfo = &textureDescriptors[i]};
+      vkUpdateDescriptorSets(device.device, 1, &writeTexDescSet, 0, nullptr);
+      prims[i] = {.prim_index = static_cast<uint32_t>(i),
+                  .mesh_index = 0,
+                  .texture_desc_set = texDescSet};
+    }
   }
   // PIPELINE
   VkPushConstantRange pushConstantRange{.stageFlags =
                                             VK_SHADER_STAGE_VERTEX_BIT,
                                         .size = sizeof(VkDeviceAddress)};
+  std::array<VkDescriptorSetLayout, 2> setLayouts{descriptorSetLayoutFrame,
+                                                  descriptorSetLayoutTex};
   VkPipelineLayoutCreateInfo pipelineLayoutCI{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &descriptorSetLayoutTex,
+      .setLayoutCount = static_cast<uint32_t>(setLayouts.size()),
+      .pSetLayouts = setLayouts.data(),
       .pushConstantRangeCount = 1,
       .pPushConstantRanges = &pushConstantRange};
   utils::validation::chk(vkCreatePipelineLayout(
@@ -487,7 +538,8 @@ int main() {
       device.device, VK_NULL_HANDLE, 1, &pipelineCI, nullptr, &pipeline));
 
   // RENDER LOOP
-  ShaderData shaderData{};
+  PerFrameData perFrameData{};
+  uint32_t selected_prim{1};
   glm::vec3 camPos{0.0f, 0.0f, -10.0f};
   std::array<glm::vec3, 3> objectRotations{};
   double lastTime{glfwGetTime()};
@@ -515,8 +567,8 @@ int main() {
     lastMouseX = mouseX;
     lastMouseY = mouseY;
     if (glfwGetMouseButton(pWindow, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
-      objectRotations[shaderData.selected].x -= (float)yrel * elapsedTime;
-      objectRotations[shaderData.selected].y += (float)xrel * elapsedTime;
+      objectRotations[selected_prim].x -= (float)yrel * elapsedTime;
+      objectRotations[selected_prim].y += (float)xrel * elapsedTime;
     }
 
     // Zooming with the mouse wheel
@@ -527,15 +579,13 @@ int main() {
     bool plusIsDown = glfwGetKey(pWindow, GLFW_KEY_EQUAL) == GLFW_PRESS ||
                       glfwGetKey(pWindow, GLFW_KEY_KP_ADD) == GLFW_PRESS;
     if (plusIsDown && !plusWasDown) {
-      shaderData.selected =
-          (shaderData.selected < 2) ? shaderData.selected + 1 : 0;
+      selected_prim = (selected_prim < 2) ? selected_prim + 1 : 0;
     }
     plusWasDown = plusIsDown;
     bool minusIsDown = glfwGetKey(pWindow, GLFW_KEY_MINUS) == GLFW_PRESS ||
                        glfwGetKey(pWindow, GLFW_KEY_KP_SUBTRACT) == GLFW_PRESS;
     if (minusIsDown && !minusWasDown) {
-      shaderData.selected =
-          (shaderData.selected > 0) ? shaderData.selected - 1 : 2;
+      selected_prim = (selected_prim > 0) ? selected_prim - 1 : 2;
     }
     minusWasDown = minusIsDown;
 
@@ -626,19 +676,23 @@ int main() {
     }
     utils::validation::chk(
         vkResetFences(device.device, 1, &fences[frameIndex]));
-    // Update shader data
-    shaderData.projection = glm::perspective(glm::radians(45.0f),
-                                             (float)swapchainExtent.width /
-                                                 (float)swapchainExtent.height,
-                                             0.1f, 32.0f);
-    shaderData.view = glm::translate(glm::mat4(1.0f), camPos);
+    // Update per-frame data and per-prim transforms
+    perFrameData.projection = glm::perspective(glm::radians(45.0f),
+                                               (float)swapchainExtent.width /
+                                                   (float)swapchainExtent.height,
+                                               0.1f, 32.0f);
+    perFrameData.view = glm::translate(glm::mat4(1.0f), camPos);
+    memcpy(perFrameBuffers[frameIndex].pMappedData, &perFrameData,
+           sizeof(PerFrameData));
     for (auto i = 0; i < 3; i++) {
       auto instancePos = glm::vec3((float)(i - 1) * 3.0f, 0.0f, 0.0f);
-      shaderData.model[i] = glm::translate(glm::mat4(1.0f), instancePos) *
-                            glm::mat4_cast(glm::quat(objectRotations[i]));
+      PerDrawData perDrawData{
+          .transform = glm::translate(glm::mat4(1.0f), instancePos) *
+                       glm::mat4_cast(glm::quat(objectRotations[i]))};
+      memcpy(static_cast<std::byte *>(transformBuffers[frameIndex].pMappedData) +
+                 i * sizeof(PerDrawData),
+             &perDrawData, sizeof(PerDrawData));
     }
-    memcpy(shaderDataBuffers[frameIndex].first.pMappedData, &shaderData,
-           sizeof(ShaderData));
     // Record command buffer
     auto cb = commandBuffers[frameIndex];
     utils::validation::chk(vkResetCommandBuffer(cb, 0));
@@ -709,15 +763,22 @@ int main() {
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     VkDeviceSize vOffset{0};
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                            0, 1, &descriptorSetTex, 0, nullptr);
-    vkCmdBindVertexBuffers(cb, 0, 1, &suzanneVertexBuffer.resource, &vOffset);
-    vkCmdBindIndexBuffer(cb, suzanneIndicesBuffer.resource, 0,
-                         VK_INDEX_TYPE_UINT32);
-    vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
-                       sizeof(VkDeviceAddress),
-                       &shaderDataBuffers[frameIndex].second);
-    vkCmdDrawIndexed(cb, static_cast<uint32_t>(suzanneIndices.size()), 3, 0, 0,
-                     0);
+                            0, 1, &descriptorSetsFrame[frameIndex], 0, nullptr);
+    for (const auto &prim : prims) {
+      vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              pipelineLayout, 1, 1, &prim.texture_desc_set, 0,
+                              nullptr);
+      vkCmdBindVertexBuffers(cb, 0, 1,
+                             &meshVertexBuffers[prim.mesh_index].resource,
+                             &vOffset);
+      vkCmdBindIndexBuffer(cb, meshIndexBuffers[prim.mesh_index].resource, 0,
+                           VK_INDEX_TYPE_UINT32);
+      VkDeviceAddress perDrawAddress{transformAddresses[frameIndex] +
+                                     prim.prim_index * sizeof(PerDrawData)};
+      vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                         sizeof(VkDeviceAddress), &perDrawAddress);
+      vkCmdDrawIndexed(cb, meshIndexCounts[prim.mesh_index], 1, 0, 0, 0);
+    }
     vkCmdEndRendering(cb);
     VkImageMemoryBarrier2 barrierPresent{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -786,11 +847,16 @@ int main() {
     vkDestroyDescriptorPool(device.device, descriptorPool, nullptr);
     vkDestroyDescriptorSetLayout(device.device, descriptorSetLayoutTex,
                                  nullptr);
+    vkDestroyDescriptorSetLayout(device.device, descriptorSetLayoutFrame,
+                                 nullptr);
     for (auto &texture : textures) {
       destroyTexture(device, texture);
     }
-    for (auto &shaderDataBuffer : shaderDataBuffers) {
-      destroyBuffer(device, shaderDataBuffer.first);
+    for (auto &perFrameBuffer : perFrameBuffers) {
+      destroyBuffer(device, perFrameBuffer);
+    }
+    for (auto &transformBuffer : transformBuffers) {
+      destroyBuffer(device, transformBuffer);
     }
     destroyBuffer(device, suzanneIndicesBuffer);
     destroyBuffer(device, suzanneVertexBuffer);

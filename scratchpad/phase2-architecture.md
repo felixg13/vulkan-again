@@ -19,7 +19,13 @@ boilerplate.
 | Material scalars | Per-material UBO in set 1; layout taken from Slang reflection. |
 | Material mutability | Immutable after `compile`. A re-sync compiles a new material and returns a new handle. |
 | Vertex stage | Engine-owned, hand-written. Fixed output struct `{position, normal, uv}`. Generated MaterialX code is the pixel stage only. |
-| Generated-code binding | Small adapter in the pixel stage maps the engine struct to the varyings the generated code expects; modules composed at link time via Slang, never by patching generated text. |
+| Generated-code binding | Pixel entry point (adapter) takes the engine varyings, builds `VertexData` by field name, calls the generated `fragmentMain`. Emitted per material from the `VertexData` field list. Source is concatenated (`preamble + generated + adapter`); generated text is never edited. See spike F2/F4. |
+| Generated cbuffer placement | The preamble `#define cbuffer [[vk::binding(0,1)]] cbuffer` moves the block and nested resources to set 1 (spike F2). |
+| View/light data | Mirrored into each material's UBO every frame (`u_viewPosition`, `u_lightData`). One persistently mapped UBO per material, no ring (`render()` submits and waits). Set 0 keeps projection, view, light for the engine vertex stage. Light is therefore stored in two places. |
+| Samplers | One engine-wide linear/repeat sampler for Phase 2; per-node address/filter state is a stated limitation. Env textures declared by generated code are bound to shared 1x1 black defaults. |
+| Slang version | FetchContent 2026.14 only. The Vulkan SDK's slang is not used (its `slangc` crashes on the composed module). |
+| MaterialX source (Phase 2) | Standalone MaterialX 1.39.5 via FetchContent. The USD-install equivalence check is deferred to Phase 3 Step 1. |
+| SPIR-V size / env cost | Measured once in Step 5 with Slang optimization on; `VkPipelineCache` persisted to disk. Env sample count untouched until it shows as a cost. |
 | Vertex layout | Fixed `{pos, normal, uv}`. Importer fills defaults for missing primvars. |
 | Ownership | `PipelineCache` and `Material` are members owned by `Renderer`, not statics. |
 | Scene API | Incremental: `add_mesh`, `add_prim`, `set_transform`, `remove_prim`, plus explicit `release_*`. |
@@ -89,23 +95,35 @@ Descriptor layout (shared by all pipelines):
 
 ```
 set 0 | binding 0 | UBO | PerFrameData { projection, view, light_dir }
-set 1 | reflected  | per-material UBO + textures (from Slang reflection)
+set 1 | reflected  | per-material UBO (incl. u_viewPosition, u_lightData) +
+                    SAMPLED_IMAGE / SAMPLER pairs (Slang splits SamplerTexture2D)
 push  | 8 bytes    | BDA → PerDrawData { mat4 transform }, vertex stage
 ```
 
 ### Vertex / pixel contract
 
 - The engine vertex module always outputs one struct: world position, normal, uv.
-- The generated pixel module expects MaterialX's own varyings. A small adapter in the
-  pixel stage fills them from the engine struct. It is the only code that knows both sides.
-- Vertex module compiled once, composed with each generated pixel module through Slang
-  composition. Generated source is never edited.
+- The generated pixel module expects MaterialX's own varyings, and the `VertexData` field
+  order (so `Location` numbers) differs per material. The adapter is a pixel entry point
+  that takes the engine varyings, builds `VertexData` by field name, and calls the
+  generated `fragmentMain(d)`. Its body is emitted per material from
+  `stage.getInputBlock(HW::VERTEX_DATA)`. It is the only code that knows both sides.
+- The module is built by source concatenation: `preamble + generated + adapter`, with the
+  engine vertex stage in the same module. The vertex stage is therefore compiled once per
+  material, not once total. Generated source is never edited. (Link-time composition via
+  `createCompositeComponentType` was not attempted; the preamble must live in the
+  generated module's own source anyway.)
 - A geometry feature mask in the pipeline key is **not** built. Add it only if a real scene
   needs another vertex stream.
 
 ---
 
-## Step 0 — Spike (throwaway)
+## Step 0 — Spike (DONE — see `step0-spike-findings.md`)
+
+Result: criteria 1–5 passed (criterion 1 against a standalone MaterialX build, not the
+USD install; that check is deferred, see Build). Findings F1–F7 are folded into the
+decisions table, the vertex/pixel contract, Step 5 and the engine rules below. The text
+below is kept as the original plan.
 
 **Goal:** prove the MaterialX → Slang → SPIR-V → reflection chain before the plan depends
 on it. Throwaway code, not merged into `src/`.
@@ -277,13 +295,26 @@ End state: same output, `DrawablePrim` fully handle-based, gtest unchanged.
 
 `compile(MaterialX::DocumentPtr)`:
 
-1. MaterialX Slang shadergen emits the pixel-stage surface source.
-2. Wrap with the adapter module; compose with the engine vertex module; compile to SPIR-V
-   via `compileShader` (hash cached).
-3. Slang reflection walks space 1 → `VkDescriptorSetLayoutBinding[]` → `set1_layout`.
-4. Create the params UBO from the reflected block; load textures referenced by the
-   document (stb_image, mips, format from colorspace); write set 1.
+1. MaterialX Slang shadergen emits the pixel-stage surface source. Generator context:
+   `hwMaxActiveLightSources = 1`, `bindLightShader(ND_directional_light, 1, ctx)`, default
+   `hwSpecularEnvironmentMethod`.
+2. Build the module by concatenation: preamble (`#define cbuffer ...`) + generated +
+   per-material adapter + engine vertex stage; compile to SPIR-V via `compileShader`
+   (hash cached) with Slang optimization enabled.
+3. Slang reflection walks space 1 → `VkDescriptorSetLayoutBinding[]` → `set1_layout`
+   (UBO, then `SAMPLED_IMAGE` + `SAMPLER` pairs).
+4. Create the params UBO from the reflected block (persistently mapped, one per material);
+   record the reflected offsets of `u_viewPosition` and `u_lightData`. Load textures
+   referenced by the document (stb_image, mips, format from colorspace). Bind the engine
+   sampler to every reflected sampler; bind 1x1 black defaults to the env textures. Write
+   set 1.
 5. `PipelineCache::get_or_create` → pipeline; store `CompiledMaterial`; return handle.
+
+Per frame, `render()` writes the camera position and the directional light into each live
+material's UBO at the recorded offsets, then draws.
+
+Measure in this step: SPIR-V size and pipeline creation time for the three materials
+(spike saw ~750 KB unoptimized each). Persist the `VkPipelineCache` to disk.
 
 `compile_from_file(path)` reads the document and calls `compile`.
 
@@ -304,16 +335,33 @@ images updated and green.
 ## Build & Dependencies
 
 - OpenUSD: git submodule pinned at v26.08. A repo script runs `build_usd.py` out-of-tree
-  into a gitignored install prefix (Python, tests, docs off).
-- MaterialX: 1.39.5, taken from that install via `find_package(MaterialX CONFIG)`.
-  Contingency: if the install lacks `MaterialXGenSlang`, fetch MaterialX 1.39.5 separately
-  with FetchContent (same pinned version) for Phase 2. Decided in Step 0.
-- Slang: latest release (v2026.19 at time of writing), FetchContent of the prebuilt
-  archive.
+  into a gitignored install prefix (Python, tests, docs off). Phase 2 uses no USD code.
+- MaterialX: **Phase 2 uses a standalone MaterialX 1.39.5 via FetchContent**
+  (`MATERIALX_BUILD_GEN_SLANG=ON`, tests/viewer/python/render off), the Q22 contingency.
+  The Step 0 spike validated exactly this. Whether the USD install contains and installs
+  `MaterialXGenSlang` is checked as the first task of Phase 3 Step 1; if it fails,
+  Phase 3 keeps the standalone fetch with no Phase 2 rework.
+- Slang: **2026.14**, FetchContent of the prebuilt archive as already pinned in
+  `external/CMakeLists.txt`. The Makefile's `-I/-L/-lslang/-rpath` flags pointing at the
+  Vulkan SDK must be removed so the fetched library is the one loaded at runtime. Verify
+  with `ldd` on a built binary.
 - gtest: FetchContent.
 - Submodule add and any commits are run by the user, per the git workflow rule.
 
 ---
+
+## Engine Rules from the Spike (re-test on any MaterialX or Slang bump)
+
+- **Strings:** `string`-typed ports (`tex_base_layer`, `tex_base_framerange`) have no value
+  but are declared `int` in the cbuffer. Leave them zero. (F5)
+- **Env method:** keep the default `hwSpecularEnvironmentMethod`.
+  `SPECULAR_ENVIRONMENT_NONE` generates uncompilable Slang (`u_refractionTwoSided` dropped
+  but still referenced). (F6)
+- **Env textures:** always declared, even with no image nodes. Always bind them. (F3)
+- **cbuffer placement:** `-fvk-bind-globals` does not apply; the `#define cbuffer`
+  preamble is the mechanism. (F2)
+- **Slang binary:** the Vulkan SDK 1.4.321.1 `slangc` segfaults on the composed module;
+  do not use it. (F2/Step 0)
 
 ## Out of Scope for Phase 2 (record, don't build)
 
@@ -326,8 +374,11 @@ images updated and green.
 
 ## Open Verification Items
 
-1. Does the USD install's MaterialX include and install `MaterialXGenSlang`? (Step 0)
-2. What does the generated Slang expect from the vertex stage, and does link-time
-   composition work cleanly? (Step 0)
-3. Instance/surface creation order for the `Device` split. (Step 2)
-4. Whether `hdMtlx` builds with the minimal `build_usd.py` flags chosen. (Phase 3 Step 1)
+1. Does the USD install's MaterialX include and install `MaterialXGenSlang`?
+   (Phase 3 Step 1, first task)
+2. Instance/surface creation order for the `Device` split. (Step 2)
+3. Whether `hdMtlx` builds with the minimal `build_usd.py` flags chosen. (Phase 3 Step 1)
+4. Which `libslang` the built binary actually loads after the Makefile change. (Step 1)
+5. SPIR-V size and pipeline creation time with Slang optimization on. (Step 5)
+
+Resolved by the spike: generated vertex-stage expectations (F4) and composition (F2/F4).
